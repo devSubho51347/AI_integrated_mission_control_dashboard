@@ -459,7 +459,7 @@
         <button class="icon-btn" title="Messages">[]</button>
         <button class="icon-btn" title="Refresh">R</button>
         <button class="icon-btn" title="Alerts">!</button>
-        <span class="pill">v0.1.4</span>
+        <span class="pill">v0.1.5</span>
         <span class="dot"></span>
         <span>System Online</span>
       </div>
@@ -508,6 +508,24 @@
         { name: "Reach", role: "digital marketing strategist", icon: "Re", color: "var(--red)", tasks: 0, success: 0, model: "openai/gpt-5.4", active: "No logs yet", status: "NO LOGS" },
         { name: "Dev", role: "Verify local logging system explicit model", icon: "De", color: "var(--cyan)", tasks: 1, success: 100, model: "test-model", active: "4 days ago", status: "COMPLETED" }
       ],
+      agentStats: {
+        today: 0,
+        week: 2,
+        total: 2,
+        completed: 2,
+        successRate: 100,
+        weekRate: 100,
+        distribution: [
+          { label: "Completed", value: 2, color: "var(--green)" },
+          { label: "In Progress", value: 0, color: "var(--blue)" },
+          { label: "Failed", value: 0, color: "var(--red)" },
+          { label: "Pending", value: 0, color: "var(--yellow)" }
+        ],
+        models: [
+          { model: "openai/gpt-5.4", tasks: 1, share: 50 },
+          { model: "test-model", tasks: 1, share: 50 }
+        ]
+      },
       activity: {
         days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
         total: [50, 56, 44, 64, 70, 36, 61],
@@ -619,6 +637,46 @@
         </article>`).join("")}</div>`;
     }
 
+    function taskDistributionChart() {
+      const stats = MOCK_DATA.agentStats || {};
+      const distribution = stats.distribution || [];
+      const total = distribution.reduce((sum, item) => sum + item.value, 0);
+      const circumference = 220;
+      let offset = 0;
+      const segments = distribution.map(item => {
+        const length = total ? (item.value / total) * circumference : 0;
+        const segment = `<circle cx="60" cy="60" r="35" fill="none" stroke="${item.color}" stroke-width="18" stroke-dasharray="${length} ${circumference}" stroke-dashoffset="${-offset}" transform="rotate(-90 60 60)"/>`;
+        offset += length;
+        return segment;
+      }).join("");
+      return `<svg viewBox="0 0 120 120" aria-label="Agent task distribution">
+        <circle cx="60" cy="60" r="35" fill="none" stroke="#333" stroke-width="18"/>
+        ${segments}
+      </svg>`;
+    }
+
+    function agentTaskStats() {
+      const stats = MOCK_DATA.agentStats || {};
+      const total = stats.total || 0;
+      const todayRate = total ? Math.round(((stats.today || 0) / total) * 100) : 0;
+      const weekRate = stats.weekRate || 0;
+      return section("||", "Task Statistics") + `<div class="grid cols-3"><div class="card"><span class="metric-label">Tasks Today</span><span class="metric-value">${stats.today || 0}</span><div class="progress"><div class="bar" style="--w:${todayRate}%"></div></div></div><div class="card"><span class="metric-label">Tasks This Week</span><span class="metric-value">${stats.week || 0}</span><div class="progress"><div class="bar" style="--w:${weekRate}%;background:var(--blue)"></div></div></div><div class="card"><h3>Task Distribution</h3>${taskDistributionChart()}</div></div>`;
+    }
+
+    function agentRecentActivity() {
+      const events = MOCK_DATA.activity.events || [];
+      const models = (MOCK_DATA.agentStats?.models || []).length ? MOCK_DATA.agentStats.models : [{ model: "No logged model usage", tasks: 0, share: 0 }];
+      return section("R", "Recent Activity", "Live feed from all agents") + `<div class="grid cols-2"><div class="card">${events.length ? events.map(e => `<p><strong>${e[0]}</strong> ${e[1]} <span class="live">${e[2]}</span> <span style="float:right;color:#777">${e[3]}</span></p><hr style="border-color:#202026">`).join("") : `<p>No recent log activity</p>`}</div><div class="card">${models.map(m => `<div class="model-row"><div><strong>${m.model}</strong><p>${m.tasks} logged task${m.tasks === 1 ? "" : "s"}</p></div><strong>${m.share}% usage</strong></div>`).join("")}</div></div>`;
+    }
+
+    function agentModelUsage() {
+      return section("M", "Model Usage", "Per-agent latest model from the log database or configured fallback") + `<div class="card">${MOCK_DATA.agents.map(a => `<div class="model-row"><strong>${a.icon} ${a.name}</strong><span><span class="model-chip">${a.model}</span> <span class="model-chip">${a.tasks} log${a.tasks === 1 ? "" : "s"}</span></span></div>`).join("")}</div>`;
+    }
+
+    function agentsOverview() {
+      return agentsGrid() + agentTaskStats() + agentRecentActivity() + agentModelUsage();
+    }
+
     function dashboard() {
       document.getElementById("dashboard").innerHTML = title("Z", "Command Center", "Agents, tasks, and YouTube at a glance.") +
         `<div class="grid cols-4">${MOCK_DATA.metrics.map(metricCard).join("")}</div>` +
@@ -637,16 +695,10 @@
 
     function agents() {
       document.getElementById("agents").innerHTML = title("Z", "Agents", "Live agent operations, task metrics, and real-time activity across your autonomous fleet.", `<span>Updated 27s ago</span><button class="ghost-btn">Refresh</button>`) +
-        `<div class="tabs"><button class="active" data-agent-view="overview">Overview</button><button data-agent-view="office">The Office</button></div><div id="agent-view">` + agentsGrid() +
-        section("||", "Task Statistics") + `<div class="grid cols-3"><div class="card"><span class="metric-label">Tasks Today</span><span class="metric-value">61</span><div class="progress"><div class="bar" style="--w:18%"></div></div></div><div class="card"><span class="metric-label">Tasks This Week</span><span class="metric-value">375</span><div class="progress"><div class="bar" style="--w:94%;background:var(--blue)"></div></div></div><div class="card"><h3>Task Distribution</h3><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="35" fill="none" stroke="#333" stroke-width="18"/><circle cx="60" cy="60" r="35" fill="none" stroke="var(--pink)" stroke-width="18" stroke-dasharray="55 220" transform="rotate(-90 60 60)"/><circle cx="60" cy="60" r="35" fill="none" stroke="var(--blue)" stroke-width="18" stroke-dasharray="44 220" stroke-dashoffset="-58" transform="rotate(-90 60 60)"/></svg></div></div>` +
-        section("R", "Recent Activity", "Live feed from all agents") + `<div class="grid cols-2"><div class="card">${MOCK_DATA.activity.events.map(e => `<p><strong>${e[0]}</strong> ${e[1]} <span class="live">${e[2]}</span> <span style="float:right;color:#777">${e[3]}</span></p><hr style="border-color:#202026">`).join("")}</div><div class="card">${MOCK_DATA.agents.slice(0,3).map(a => `<div class="model-row"><div><strong>${a.name}</strong><p>${a.model}</p></div><strong>${a.success}% success</strong></div>`).join("")}</div></div>` +
-        section("M", "Model Assignment", "Per-agent primary model and optional fallback") + `<div class="card">${MOCK_DATA.agents.map(a => `<div class="model-row"><strong>${a.icon} ${a.name}</strong><span><span class="model-chip">${a.model}</span> <span class="model-chip">Fallback: None</span></span></div>`).join("")}</div></div>`;
+        `<div class="tabs"><button class="active" data-agent-view="overview">Overview</button><button data-agent-view="office">The Office</button></div><div id="agent-view">` + agentsOverview() + `</div>`;
       document.querySelectorAll("[data-agent-view]").forEach(button => button.addEventListener("click", () => {
         document.querySelectorAll("[data-agent-view]").forEach(b => b.classList.toggle("active", b === button));
-        document.getElementById("agent-view").innerHTML = button.dataset.agentView === "office" ? officeView() : agentsGrid() +
-          section("||", "Task Statistics") + `<div class="grid cols-3"><div class="card"><span class="metric-label">Tasks Today</span><span class="metric-value">61</span><div class="progress"><div class="bar" style="--w:18%"></div></div></div><div class="card"><span class="metric-label">Tasks This Week</span><span class="metric-value">375</span><div class="progress"><div class="bar" style="--w:94%;background:var(--blue)"></div></div></div><div class="card"><h3>Task Distribution</h3><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="35" fill="none" stroke="#333" stroke-width="18"/><circle cx="60" cy="60" r="35" fill="none" stroke="var(--pink)" stroke-width="18" stroke-dasharray="55 220" transform="rotate(-90 60 60)"/><circle cx="60" cy="60" r="35" fill="none" stroke="var(--blue)" stroke-width="18" stroke-dasharray="44 220" stroke-dashoffset="-58" transform="rotate(-90 60 60)"/></svg></div></div>` +
-          section("R", "Recent Activity", "Live feed from all agents") + `<div class="grid cols-2"><div class="card">${MOCK_DATA.activity.events.map(e => `<p><strong>${e[0]}</strong> ${e[1]} <span class="live">${e[2]}</span> <span style="float:right;color:#777">${e[3]}</span></p><hr style="border-color:#202026">`).join("")}</div><div class="card">${MOCK_DATA.agents.slice(0,3).map(a => `<div class="model-row"><div><strong>${a.name}</strong><p>${a.model}</p></div><strong>${a.success}% success</strong></div>`).join("")}</div></div>` +
-          section("M", "Model Assignment", "Per-agent primary model and optional fallback") + `<div class="card">${MOCK_DATA.agents.map(a => `<div class="model-row"><strong>${a.icon} ${a.name}</strong><span><span class="model-chip">${a.model}</span> <span class="model-chip">Fallback: None</span></span></div>`).join("")}</div>`;
+        document.getElementById("agent-view").innerHTML = button.dataset.agentView === "office" ? officeView() : agentsOverview();
       }));
     }
 

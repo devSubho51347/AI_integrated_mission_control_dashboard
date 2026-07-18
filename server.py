@@ -287,8 +287,9 @@ def agent_log_table(con: sqlite3.Connection) -> str | None:
 
 def load_agent_logs() -> dict:
     if not AGENT_LOGS_DB_PATH.exists():
-        return {}
+        return {"by_agent": {}, "events": []}
     logs: dict[str, dict] = {}
+    events = []
     with sqlite3.connect(AGENT_LOGS_DB_PATH) as con:
         con.row_factory = sqlite3.Row
         table = agent_log_table(con)
@@ -302,6 +303,8 @@ def load_agent_logs() -> dict:
             """
         ).fetchall()
     for row in rows:
+        event = dict(row)
+        events.append(event)
         key = row["agent_name"].strip().lower()
         stats = logs.setdefault(
             key,
@@ -311,17 +314,72 @@ def load_agent_logs() -> dict:
         status = (row["status"] or "").lower()
         if status in {"complete", "completed", "done", "success", "succeeded"}:
             stats["completed"] += 1
-        stats["events"].append(dict(row))
+        stats["events"].append(event)
         latest = stats["latest"]
         if latest is None or (row["created_at"] or "") >= (latest["created_at"] or ""):
-            stats["latest"] = dict(row)
-    return logs
+            stats["latest"] = event
+    return {"by_agent": logs, "events": events}
+
+
+def status_bucket(status: str | None) -> str:
+    normalized = (status or "").lower().replace("-", "_").replace(" ", "_")
+    if normalized in {"complete", "completed", "done", "success", "succeeded"}:
+        return "completed"
+    if normalized in {"active", "running", "working", "in_progress", "progress"}:
+        return "in_progress"
+    if normalized in {"failed", "failure", "error", "errored", "blocked"}:
+        return "failed"
+    return "pending"
+
+
+def build_agent_task_stats(events: list[dict]) -> dict:
+    now = datetime.now().astimezone()
+    today = now.date()
+    week_start = today.fromordinal(today.toordinal() - today.weekday())
+    buckets = {"completed": 0, "in_progress": 0, "failed": 0, "pending": 0}
+    today_count = 0
+    week_count = 0
+    model_counts: dict[str, int] = {}
+    for event in events:
+        created = parse_timestamp(event.get("created_at"))
+        if created is not None:
+            local_created = created.astimezone()
+            if local_created.date() == today:
+                today_count += 1
+            if local_created.date() >= week_start:
+                week_count += 1
+        bucket = status_bucket(event.get("status"))
+        buckets[bucket] += 1
+        model = event.get("model_used") or "Not logged"
+        model_counts[model] = model_counts.get(model, 0) + 1
+    total = len(events)
+    distribution = [
+        {"label": "Completed", "value": buckets["completed"], "color": "var(--green)"},
+        {"label": "In Progress", "value": buckets["in_progress"], "color": "var(--blue)"},
+        {"label": "Failed", "value": buckets["failed"], "color": "var(--red)"},
+        {"label": "Pending", "value": buckets["pending"], "color": "var(--yellow)"},
+    ]
+    return {
+        "today": today_count,
+        "week": week_count,
+        "total": total,
+        "completed": buckets["completed"],
+        "successRate": round((buckets["completed"] / total) * 100) if total else 0,
+        "weekRate": round((week_count / total) * 100) if total else 0,
+        "distribution": distribution,
+        "models": [
+            {"model": model, "tasks": count, "share": round((count / total) * 100) if total else 0}
+            for model, count in sorted(model_counts.items(), key=lambda item: (-item[1], item[0]))
+        ],
+    }
 
 
 def with_live_agents(payload: dict) -> dict:
     payload = copy.deepcopy(payload)
     configured_agents = configured_dashboard_agents()
-    logs = load_agent_logs()
+    log_data = load_agent_logs()
+    logs = log_data["by_agent"]
+    all_events = log_data["events"]
     cards = []
     recent_events = []
     total_logs = 0
@@ -365,6 +423,16 @@ def with_live_agents(payload: dict) -> dict:
     if recent_events:
         recent_events.sort(key=lambda event: event[4])
         payload["activity"]["events"] = [event[:4] for event in recent_events[-3:][::-1]]
+    payload["agentStats"] = build_agent_task_stats(
+        [
+            event
+            for event in all_events
+            if any(
+                event["agent_name"].strip().lower() in {agent["id"].lower(), agent["name"].lower()}
+                for agent in configured_agents
+            )
+        ]
+    )
     return payload
 
 
@@ -421,7 +489,7 @@ def get_payload(key: str) -> dict:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "AgentDashboard/0.1.4"
+    server_version = "AgentDashboard/0.1.5"
 
     def log_message(self, fmt: str, *args: object) -> None:
         message = "%s - %s\n" % (self.log_date_time_string(), fmt % args)
