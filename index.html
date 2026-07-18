@@ -459,7 +459,7 @@
         <button class="icon-btn" title="Messages">[]</button>
         <button class="icon-btn" title="Refresh">R</button>
         <button class="icon-btn" title="Alerts">!</button>
-        <span class="pill">v0.1.5</span>
+        <span class="pill">v0.1.6</span>
         <span class="dot"></span>
         <span>System Online</span>
       </div>
@@ -703,15 +703,26 @@
     }
 
     function officeView() {
+      const positions = [
+        { type: "desk", style: "left:8%;top:12%" },
+        { type: "desk", style: "left:28%;top:12%" },
+        { type: "desk", style: "left:48%;top:12%" },
+        { type: "desk", style: "left:8%;top:44%" },
+        { type: "desk", style: "left:60%;top:44%" },
+        { type: "desk", style: "left:42%;top:74%" }
+      ];
+      const desks = MOCK_DATA.agents.slice(0, 6).map((agent, index) => {
+        const position = positions[index];
+        return `<div class="${position.type}" style="${position.style}">${agent.name}<div class="agent-dot" style="--agent:${agent.color}">${agent.icon}</div><p>${agent.active}</p></div>`;
+      }).join("");
+      const roomAgent = MOCK_DATA.agents[6];
+      const room = roomAgent ? `<div class="room"><strong>${roomAgent.name}</strong><div class="agent-dot" style="--agent:${roomAgent.color};margin-top:210px">${roomAgent.icon}</div><h3>${roomAgent.name}</h3><p>${roomAgent.active}</p></div>` : "";
+      const latest = MOCK_DATA.activity.events?.[0];
       return section("HQ", "The Office", "Live view of your agent HQ - desks light up on activity") +
         `<div class="office">
-          <div class="desk" style="left:22%;top:12%">Scout<div class="agent-dot" style="--agent:var(--pink)">S</div><p>7d ago</p></div>
-          <div class="desk" style="left:42%;top:12%">Scribe<div class="agent-dot" style="--agent:var(--yellow)">Sc</div><p>7d ago</p></div>
-          <div class="desk" style="left:8%;top:44%">Reach<div class="agent-dot" style="--agent:var(--green)">R</div><p>7d ago</p></div>
-          <div class="desk" style="left:60%;top:44%">Orch<div class="agent-dot" style="--agent:var(--blue)">O</div><p>12d ago</p></div>
-          <div class="desk" style="left:42%;top:74%">Dev<div class="agent-dot" style="--agent:var(--red)">D</div><p>7d ago</p></div>
-          <div class="hub"><strong>WORKING HUB</strong><p style="margin-top:40px;color:#fff">Picked top evening news item</p></div>
-          <div class="room"><strong>BILL</strong><div class="agent-dot" style="--agent:var(--purple);margin-top:210px">B</div><h3>Bill</h3><p>5h ago</p></div>
+          ${desks}
+          <div class="hub"><strong>WORKING HUB</strong><p style="margin-top:40px;color:#fff">${latest ? latest[1] : "No recent log activity"}</p></div>
+          ${room}
         </div>`;
     }
 
