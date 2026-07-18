@@ -459,7 +459,7 @@
         <button class="icon-btn" title="Messages">[]</button>
         <button class="icon-btn" title="Refresh">R</button>
         <button class="icon-btn" title="Alerts">!</button>
-        <span class="pill">v0.1.3</span>
+        <span class="pill">v0.1.4</span>
         <span class="dot"></span>
         <span>System Online</span>
       </div>
@@ -494,27 +494,27 @@
     let MOCK_DATA = {
       pages: ["Dashboard", "Content", "Agents", "Tasks", "Chat", "Productivity", "Monitor"],
       metrics: [
-        ["Active Agents", "6", "online now", "orange"],
-        ["Agent Tasks", "7", "completed today", "blue"],
+        ["Active Agents", "7", "online now", "orange"],
+        ["Agent Tasks", "2", "logged tasks", "blue"],
         ["To-Dos Open", "8", "in progress + todo", "green"],
         ["Uptime", "7d 0h", "since boot", "purple"]
       ],
       agents: [
-        { name: "Orchestrator", role: "Role not defined locally", icon: "+", color: "var(--blue)", tasks: 12, success: 97, model: "openai-codex/gpt-5.4", active: "3 min ago" },
-        { name: "Bill", role: "Discord Operations", icon: "B", color: "var(--purple)", tasks: 8, success: 94, model: "minimax/MiniMax-M2.7", active: "18 min ago" },
-        { name: "Scout", role: "Research & Intelligence", icon: "S", color: "var(--pink)", tasks: 15, success: 98, model: "openai-codex/gpt-5.4", active: "1 min ago" },
-        { name: "Scribe", role: "Writing & Content Shaping", icon: "Sc", color: "var(--yellow)", tasks: 11, success: 96, model: "minimax/MiniMax-M2.7", active: "5 min ago" },
-        { name: "Reach", role: "Marketing & Growth", icon: "R", color: "var(--green)", tasks: 6, success: 91, model: "openai-codex/gpt-5.4", active: "31 min ago" },
-        { name: "Dev", role: "Development & Automation", icon: "D", color: "var(--red)", tasks: 9, success: 95, model: "minimax/MiniMax-M2.7", active: "8 min ago" }
+        { name: "dsa-agent", role: "Configured OpenClaw agent", icon: "DA", color: "var(--blue)", tasks: 0, success: 0, model: "openai/gpt-5.5", active: "No logs yet", status: "NO LOGS" },
+        { name: "Orchestrator", role: "Verify local logging system auto model", icon: "Or", color: "var(--purple)", tasks: 1, success: 100, model: "openai/gpt-5.4", active: "4 days ago", status: "COMPLETED" },
+        { name: "blog-swarm", role: "Configured OpenClaw agent", icon: "BS", color: "var(--pink)", tasks: 0, success: 0, model: "openai/gpt-5.4", active: "No logs yet", status: "NO LOGS" },
+        { name: "Scout", role: "deep research specialist", icon: "Sc", color: "var(--yellow)", tasks: 0, success: 0, model: "openai/gpt-5.4", active: "No logs yet", status: "NO LOGS" },
+        { name: "Scribe", role: "professional content writer", icon: "Sc", color: "var(--green)", tasks: 0, success: 0, model: "openai/gpt-5.4", active: "No logs yet", status: "NO LOGS" },
+        { name: "Reach", role: "digital marketing strategist", icon: "Re", color: "var(--red)", tasks: 0, success: 0, model: "openai/gpt-5.4", active: "No logs yet", status: "NO LOGS" },
+        { name: "Dev", role: "Verify local logging system explicit model", icon: "De", color: "var(--cyan)", tasks: 1, success: 100, model: "test-model", active: "4 days ago", status: "COMPLETED" }
       ],
       activity: {
         days: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
         total: [50, 56, 44, 64, 70, 36, 61],
         completed: [48, 54, 42, 61, 68, 35, 58],
         events: [
-          ["Scout", "Morning competitor brief - 8 channels scanned, 5 top picks selected and ranked", "Completed", "1 min ago"],
-          ["Orchestrator", "Routed incoming Discord task to Dev and Scribe with context packet attached", "Completed", "3 min ago"],
-          ["Scribe", "Drafted full community update post - 620 words, three sections, ready for review", "Completed", "5 min ago"]
+          ["Orchestrator", "Verify local logging system auto model", "Completed", "4 days ago"],
+          ["Dev", "Verify local logging system explicit model", "Completed", "4 days ago"]
         ]
       },
       tasks: {
@@ -611,7 +611,7 @@
         <article class="card agent-card" style="--agent:${a.color}">
           <div class="avatar">${a.icon}</div>
           <div><h3>${a.name}</h3><p>${a.role}</p></div>
-          <div class="metric-row"><span class="live">LIVE</span><span class="ring">${a.success}%</span></div>
+          <div class="metric-row"><span class="live">${a.status || "LIVE"}</span><span class="ring">${a.success}%</span></div>
           <div><span class="task-count">${a.tasks}</span><span class="metric-label" style="float:right;margin-top:17px">Tasks Today</span></div>
           <div class="progress"><div class="bar" style="--w:${a.success}%;background:${a.color}"></div></div>
           <div class="meta"><span>MODEL</span><span class="model-chip">${a.model}</span></div>

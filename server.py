@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import mimetypes
 import os
@@ -21,6 +22,19 @@ DATA_DIR = APP_DIR / "data"
 DB_PATH = DATA_DIR / "dashboard.db"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 3000
+OPENCLAW_DIR = Path.home() / ".openclaw"
+OPENCLAW_CONFIG_PATH = OPENCLAW_DIR / "openclaw.json"
+AGENT_LOGS_DB_PATH = OPENCLAW_DIR / "agent-logs.db"
+EXCLUDED_DASHBOARD_AGENTS = {"main", "research-agent", "linkedin_trend_scraper"}
+AGENT_COLORS = [
+    "var(--blue)",
+    "var(--purple)",
+    "var(--pink)",
+    "var(--yellow)",
+    "var(--green)",
+    "var(--red)",
+    "var(--cyan)",
+]
 
 
 DEFAULT_BOOTSTRAP = {
@@ -181,6 +195,179 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def parse_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    normalized = value.replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def human_ago(value: str | None) -> str:
+    parsed = parse_timestamp(value)
+    if parsed is None:
+        return "No logs yet"
+    seconds = max(0, int((datetime.now(timezone.utc) - parsed).total_seconds()))
+    if seconds < 60:
+        return "just now"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    days = hours // 24
+    return f"{days} day{'s' if days != 1 else ''} ago"
+
+
+def read_openclaw_config() -> dict:
+    if not OPENCLAW_CONFIG_PATH.exists():
+        return {}
+    raw = OPENCLAW_CONFIG_PATH.read_bytes()
+    for encoding in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be"):
+        try:
+            return json.loads(raw.decode(encoding))
+        except (UnicodeError, json.JSONDecodeError):
+            continue
+    return {}
+
+
+def agent_icon(name: str) -> str:
+    parts = [part for part in name.replace("-", " ").split() if part]
+    if not parts:
+        return "A"
+    if len(parts) == 1:
+        return parts[0][:2].title()
+    return "".join(part[0] for part in parts[:2]).upper()
+
+
+def configured_dashboard_agents() -> list[dict]:
+    config = read_openclaw_config()
+    defaults = config.get("agents", {}).get("defaults", {})
+    default_model = defaults.get("model", {}).get("primary", "Not logged")
+    existing_dirs = {
+        item.name
+        for item in (OPENCLAW_DIR / "agents").iterdir()
+        if item.is_dir() and not item.name.startswith("_")
+    } if (OPENCLAW_DIR / "agents").exists() else set()
+    agents = []
+    for item in config.get("agents", {}).get("list", []):
+        agent_id = item.get("id") or item.get("name")
+        if not agent_id or agent_id in EXCLUDED_DASHBOARD_AGENTS or agent_id not in existing_dirs:
+            continue
+        name = item.get("name") or agent_id
+        identity = item.get("identity") or {}
+        agents.append(
+            {
+                "id": agent_id,
+                "name": name,
+                "theme": identity.get("theme") or "Configured OpenClaw agent",
+                "model": item.get("model") or default_model,
+            }
+        )
+    return agents
+
+
+def agent_log_table(con: sqlite3.Connection) -> str | None:
+    tables = {
+        row["name"]
+        for row in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    if "agent_logs" in tables:
+        return "agent_logs"
+    if "agent_task_logs" in tables:
+        return "agent_task_logs"
+    return None
+
+
+def load_agent_logs() -> dict:
+    if not AGENT_LOGS_DB_PATH.exists():
+        return {}
+    logs: dict[str, dict] = {}
+    with sqlite3.connect(AGENT_LOGS_DB_PATH) as con:
+        con.row_factory = sqlite3.Row
+        table = agent_log_table(con)
+        if table is None:
+            return logs
+        rows = con.execute(
+            f"""
+            SELECT agent_name, task_description, model_used, status, created_at
+            FROM {table}
+            ORDER BY created_at ASC
+            """
+        ).fetchall()
+    for row in rows:
+        key = row["agent_name"].strip().lower()
+        stats = logs.setdefault(
+            key,
+            {"total": 0, "completed": 0, "latest": None, "events": []},
+        )
+        stats["total"] += 1
+        status = (row["status"] or "").lower()
+        if status in {"complete", "completed", "done", "success", "succeeded"}:
+            stats["completed"] += 1
+        stats["events"].append(dict(row))
+        latest = stats["latest"]
+        if latest is None or (row["created_at"] or "") >= (latest["created_at"] or ""):
+            stats["latest"] = dict(row)
+    return logs
+
+
+def with_live_agents(payload: dict) -> dict:
+    payload = copy.deepcopy(payload)
+    configured_agents = configured_dashboard_agents()
+    logs = load_agent_logs()
+    cards = []
+    recent_events = []
+    total_logs = 0
+    completed_logs = 0
+    for index, agent in enumerate(configured_agents):
+        keys = {agent["id"].lower(), agent["name"].lower()}
+        stats = next((logs[key] for key in keys if key in logs), None)
+        latest = stats["latest"] if stats else None
+        total = stats["total"] if stats else 0
+        completed = stats["completed"] if stats else 0
+        total_logs += total
+        completed_logs += completed
+        cards.append(
+            {
+                "name": agent["name"],
+                "role": latest["task_description"] if latest else agent["theme"],
+                "icon": agent_icon(agent["name"]),
+                "color": AGENT_COLORS[index % len(AGENT_COLORS)],
+                "tasks": total,
+                "success": round((completed / total) * 100) if total else 0,
+                "model": latest["model_used"] if latest and latest["model_used"] else agent["model"],
+                "active": human_ago(latest["created_at"] if latest else None),
+                "status": (latest["status"] if latest else "No logs").upper(),
+            }
+        )
+        if stats:
+            for event in stats["events"]:
+                recent_events.append(
+                    [
+                        agent["name"],
+                        event["task_description"],
+                        (event["status"] or "unknown").title(),
+                        human_ago(event["created_at"]),
+                        event["created_at"] or "",
+                    ]
+                )
+    payload["agents"] = cards
+    payload["metrics"][0][1] = str(len(cards))
+    payload["metrics"][1][1] = str(total_logs)
+    payload["metrics"][1][2] = "logged tasks"
+    if recent_events:
+        recent_events.sort(key=lambda event: event[4])
+        payload["activity"]["events"] = [event[:4] for event in recent_events[-3:][::-1]]
+    return payload
+
+
 def connect() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH)
@@ -227,11 +414,14 @@ def get_payload(key: str) -> dict:
         ).fetchone()
     if row is None:
         return {}
-    return json.loads(row["payload_json"])
+    payload = json.loads(row["payload_json"])
+    if key == "bootstrap":
+        return with_live_agents(payload)
+    return payload
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "AgentDashboard/0.1.3"
+    server_version = "AgentDashboard/0.1.4"
 
     def log_message(self, fmt: str, *args: object) -> None:
         message = "%s - %s\n" % (self.log_date_time_string(), fmt % args)
