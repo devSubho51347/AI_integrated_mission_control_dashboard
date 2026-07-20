@@ -1286,7 +1286,7 @@ def get_payload(key: str) -> dict:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "AgentDashboard/0.2.0"
+    server_version = "AgentDashboard/0.2.1"
 
     def log_message(self, fmt: str, *args: object) -> None:
         message = "%s - %s\n" % (self.log_date_time_string(), fmt % args)

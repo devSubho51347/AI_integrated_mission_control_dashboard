@@ -485,7 +485,7 @@
         <button class="icon-btn" title="Messages">[]</button>
         <button class="icon-btn" title="Refresh">R</button>
         <button class="icon-btn" title="Alerts">!</button>
-        <span class="pill">v0.2.0</span>
+        <span class="pill">v0.2.1</span>
         <span class="dot"></span>
         <span>System Online</span>
       </div>
@@ -510,7 +510,6 @@
       Mock placeholders to replace with live data later:
       - MOCK_DATA.agents: real OpenClaw agent registry, model assignment, status, last activity.
       - MOCK_DATA.metrics: dashboard counters, uptime, task totals.
-      - MOCK_DATA.tasks: live task/Kanban API or task database.
       - MOCK_DATA.activity: recent agent event stream and historical chart points.
       - MOCK_DATA.documents: generated files/content index and rendered previews.
       - MOCK_DATA.messages: per-agent chat/session history.
@@ -559,29 +558,6 @@
         events: [
           ["Orchestrator", "Verify local logging system auto model", "Completed", "4 days ago"],
           ["Dev", "Verify local logging system explicit model", "Completed", "4 days ago"]
-        ]
-      },
-      tasks: {
-        todo: [
-          ["Audit OpenClaw gateway logs for reconnect patterns", "Work", "Urgent", "7d overdue"],
-          ["Write YouTube title A/B variants for next 3 uploads", "Marketing", "Normal", "5d overdue"],
-          ["Draft outreach email to 5 top AI newsletter sponsors", "Marketing", "Normal", "4d overdue"],
-          ["Plan community Discord event for next weekend", "Work", "Someday", ""]
-        ],
-        progress: [
-          ["Record walkthrough video of the Mission Control dashboard", "Marketing", "Urgent", "6d overdue"],
-          ["Review and merge Dev's mobile responsiveness PR", "Development", "Urgent", "7d overdue"],
-          ["Set up Tailscale exit-node fallback for VPS failover", "Development", "Normal", "5d overdue"]
-        ],
-        done: [
-          ["Full mobile responsiveness audit and fix pass", "Development", "Urgent", ""],
-          ["Configure nginx reverse proxy on Tailscale IP", "Development", "Normal", ""],
-          ["Implement Model Assignment card in Agents tab", "Development", "Urgent", ""],
-          ["Fix agent walk-back animation after log entry", "Development", "Urgent", ""],
-          ["Publish weekly community update", "Marketing", "Urgent", ""],
-          ["Research top AI creator tools for competitive landscape doc", "Work", "Normal", ""],
-          ["Ship the live activity chart backend payload", "Development", "Normal", ""],
-          ["Personal: set up automated invoice reminders", "Personal", "Someday", ""]
         ]
       },
       documents: [
@@ -799,27 +775,6 @@
         </div>`;
     }
 
-    function embeddedTasksData() {
-      const now = new Date().toISOString();
-      const convert = (status, items = []) => items.map((task, index) => ({
-        id: `${status}-${index}`,
-        title: task[0],
-        category: task[1],
-        priority: task[2],
-        status,
-        completed: status === "done",
-        due_date: null,
-        notes: task[3] || "",
-        created_at: now,
-        updated_at: now
-      }));
-      return [
-        ...convert("todo", MOCK_DATA.tasks.todo),
-        ...convert("in_progress", MOCK_DATA.tasks.progress),
-        ...convert("done", MOCK_DATA.tasks.done)
-      ];
-    }
-
     async function taskRequest(url, options = {}) {
       const response = await fetch(url, {
         cache: "no-store",
@@ -832,15 +787,15 @@
 
     async function loadTasksData() {
       if (location.protocol === "file:") {
-        TASKS_DATA = embeddedTasksData();
+        TASKS_DATA = [];
         return;
       }
       try {
         const query = selectedTaskCategory ? `?category=${encodeURIComponent(selectedTaskCategory)}` : "";
         TASKS_DATA = await taskRequest(`/api/tasks${query}`);
       } catch (error) {
-        console.warn("Using embedded task preview data", error);
-        TASKS_DATA = embeddedTasksData();
+        console.error("Unable to load database tasks", error);
+        TASKS_DATA = [];
       }
     }
 
@@ -867,7 +822,7 @@
     }
 
     function tasks() {
-      const taskData = TASKS_DATA || embeddedTasksData();
+      const taskData = TASKS_DATA || [];
       const groups = {
         todo: taskData.filter(task => task.status === "todo"),
         in_progress: taskData.filter(task => task.status === "in_progress"),
