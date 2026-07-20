@@ -15,8 +15,10 @@ class ProductivityApiTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.original_data_dir = server.DATA_DIR
         self.original_db_path = server.DB_PATH
+        self.original_docs_dir = server.DOCS_DIR
         server.DATA_DIR = Path(self.temp_dir.name)
         server.DB_PATH = server.DATA_DIR / "dashboard.db"
+        server.DOCS_DIR = Path(self.temp_dir.name) / "docs"
         server.init_db()
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.DashboardHandler)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
@@ -29,6 +31,7 @@ class ProductivityApiTests(unittest.TestCase):
         self.httpd.server_close()
         server.DATA_DIR = self.original_data_dir
         server.DB_PATH = self.original_db_path
+        server.DOCS_DIR = self.original_docs_dir
         self.temp_dir.cleanup()
 
     def request(self, method, path, payload=None):
@@ -67,6 +70,11 @@ class ProductivityApiTests(unittest.TestCase):
         status, task = self.request("POST", "/api/tasks", payload)
         self.assertEqual(status, 201)
         return task
+
+    def write_doc_file(self, agent="scout", filename="market-brief.md", content="# Market Brief\n\nSignals."):
+        path = server.DOCS_DIR / agent
+        path.mkdir(parents=True, exist_ok=True)
+        (path / filename).write_text(content, encoding="utf-8")
 
     def test_fetching_seeded_notes(self):
         status, payload = self.request("GET", "/api/notes")
@@ -150,6 +158,69 @@ class ProductivityApiTests(unittest.TestCase):
         status, payload = self.request("PATCH", "/api/tasks/1", {"status": "blocked"})
         self.assertEqual(status, 400)
         self.assertIn("status", payload["error"]["message"])
+
+    def test_listing_documents_uses_existing_agent_files_without_body(self):
+        self.write_doc_file("scout", "market-brief.md", "# Market Brief\n\nSignals.")
+        self.write_doc_file("scribe", "draft.txt", "Plain text draft")
+        status, payload = self.request("GET", "/api/documents")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload), 2)
+        first = next(item for item in payload if item["filename"] == "market-brief.md")
+        self.assertEqual(first["title"], "Market Brief")
+        self.assertEqual(first["agent"], "scout")
+        self.assertIn("size", first)
+        self.assertIn("modified_at", first)
+        self.assertNotIn("content", first)
+
+    def test_reading_a_single_document_returns_full_content(self):
+        self.write_doc_file("scribe", "launch-note.md", "# Launch Note\n\nBody copy.")
+        status, payload = self.request("GET", "/api/documents/scribe/launch-note.md")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["title"], "Launch Note")
+        self.assertEqual(payload["content"], "# Launch Note\n\nBody copy.")
+
+    def test_creating_updating_and_deleting_a_document(self):
+        status, created = self.request(
+            "POST",
+            "/api/documents/scout",
+            {"filename": "trend-scan.md", "content": "# Trend Scan\n\nInitial"},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(created["agent"], "scout")
+        self.assertEqual(created["filename"], "trend-scan.md")
+        self.assertEqual(created["content"], "# Trend Scan\n\nInitial")
+
+        status, updated = self.request(
+            "PUT",
+            "/api/documents/scout/trend-scan.md",
+            {"content": "# Trend Scan\n\nUpdated"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["content"], "# Trend Scan\n\nUpdated")
+
+        status, payload = self.request("DELETE", "/api/documents/scout/trend-scan.md")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["deleted"])
+
+        status, payload = self.request("GET", "/api/documents/scout/trend-scan.md")
+        self.assertEqual(status, 404)
+
+    def test_rejecting_unsafe_or_unsupported_document_paths(self):
+        status, payload = self.request(
+            "POST",
+            "/api/documents/scout",
+            {"filename": "../escape.md", "content": "bad"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("filename", payload["error"]["message"])
+
+        status, payload = self.request(
+            "POST",
+            "/api/documents/scout",
+            {"filename": "image.png", "content": "bad"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("filename", payload["error"]["message"])
 
     def test_creating_a_valid_note(self):
         note = self.create_note()

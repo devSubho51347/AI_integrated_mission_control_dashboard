@@ -15,13 +15,14 @@ from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 APP_DIR = Path(__file__).resolve().parent
 INDEX_PATH = APP_DIR / "index.html"
 DATA_DIR = APP_DIR / "data"
 DB_PATH = DATA_DIR / "dashboard.db"
+DOCS_DIR = APP_DIR / "docs"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 3000
 OPENCLAW_DIR = Path.home() / ".openclaw"
@@ -52,6 +53,7 @@ PRODUCTIVITY_SCOPES = {"monthly", "weekly", "default"}
 TASK_CATEGORIES = {"Work", "Marketing", "Development", "Personal"}
 TASK_PRIORITIES = {"Urgent", "Normal", "Someday"}
 TASK_STATUSES = {"todo", "in_progress", "done"}
+DOCUMENT_EXTENSIONS = {".md", ".markdown", ".txt"}
 TASK_SEEDS = [
     {
         "title": "Audit OpenClaw gateway reconnect logs",
@@ -907,6 +909,96 @@ def clear_done_tasks() -> int:
         return cursor.rowcount
 
 
+def validate_path_segment(value: object, field_name: str) -> tuple[str | None, str | None]:
+    if not isinstance(value, str):
+        return None, f"{field_name} must be a string"
+    segment = value.strip()
+    if not segment:
+        return None, f"{field_name} must not be empty"
+    if segment in {".", ".."} or "/" in segment or "\\" in segment:
+        return None, f"{field_name} must be a single path segment"
+    return segment, None
+
+
+def validate_document_filename(value: object) -> tuple[str | None, str | None]:
+    filename, error = validate_path_segment(value, "filename")
+    if error:
+        return None, error
+    suffix = Path(filename).suffix.lower()
+    if suffix not in DOCUMENT_EXTENSIONS:
+        return None, f"filename must end with one of: {', '.join(sorted(DOCUMENT_EXTENSIONS))}"
+    return filename, None
+
+
+def safe_document_path(agent: str, filename: str) -> Path:
+    root = DOCS_DIR.resolve()
+    path = (DOCS_DIR / agent / filename).resolve()
+    path.relative_to(root)
+    return path
+
+
+def document_title(path: Path) -> str:
+    try:
+        with path.open("r", encoding="utf-8-sig") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    title = stripped.lstrip("#").strip()
+                    if title:
+                        return title
+    except UnicodeDecodeError:
+        pass
+    return path.stem.replace("-", " ").replace("_", " ").strip().title() or path.name
+
+
+def document_metadata(path: Path, agent: str) -> dict:
+    stat = path.stat()
+    return {
+        "title": document_title(path),
+        "agent": agent,
+        "filename": path.name,
+        "size": stat.st_size,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(timespec="seconds"),
+    }
+
+
+def list_documents() -> list[dict]:
+    if not DOCS_DIR.exists():
+        return []
+    documents = []
+    for agent_dir in sorted((item for item in DOCS_DIR.iterdir() if item.is_dir()), key=lambda item: item.name.lower()):
+        agent = agent_dir.name
+        for path in sorted((item for item in agent_dir.iterdir() if item.is_file()), key=lambda item: item.name.lower()):
+            if path.suffix.lower() in DOCUMENT_EXTENSIONS:
+                documents.append(document_metadata(path, agent))
+    documents.sort(key=lambda item: (item["agent"].lower(), item["filename"].lower()))
+    return documents
+
+
+def read_document(agent: str, filename: str) -> dict | None:
+    path = safe_document_path(agent, filename)
+    if not path.exists() or not path.is_file():
+        return None
+    metadata = document_metadata(path, agent)
+    metadata["content"] = path.read_text(encoding="utf-8-sig")
+    return metadata
+
+
+def write_document(agent: str, filename: str, content: str) -> dict:
+    path = safe_document_path(agent, filename)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8", newline="")
+    return read_document(agent, filename)
+
+
+def delete_document(agent: str, filename: str) -> bool:
+    path = safe_document_path(agent, filename)
+    if not path.exists() or not path.is_file():
+        return False
+    path.unlink()
+    return True
+
+
 def list_notes() -> list[dict]:
     with closing(connect()) as con:
         rows = con.execute(
@@ -1286,7 +1378,7 @@ def get_payload(key: str) -> dict:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "AgentDashboard/0.2.1"
+    server_version = "AgentDashboard/0.2.2"
 
     def log_message(self, fmt: str, *args: object) -> None:
         message = "%s - %s\n" % (self.log_date_time_string(), fmt % args)
@@ -1323,6 +1415,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     return
             self.handle_database(lambda: self.send_json(list_tasks(category)))
             return
+        if path == "/api/documents":
+            self.handle_documents(lambda: self.send_json(list_documents()))
+            return
+        if len(path_parts := [unquote(part) for part in path.split("/") if part]) == 4 and path_parts[:2] == ["api", "documents"]:
+            self.handle_documents(lambda: self.handle_read_document(path_parts[2], path_parts[3]))
+            return
         if path == "/api/notes":
             self.handle_database(lambda: self.send_json(list_notes()))
             return
@@ -1350,6 +1448,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/tasks":
             self.handle_database(self.handle_create_task)
+            return
+        if len(path_parts := [unquote(part) for part in path.split("/") if part]) == 3 and path_parts[:2] == ["api", "documents"]:
+            self.handle_documents(lambda: self.handle_create_document(path_parts[2]))
             return
         if path == "/api/goals":
             self.handle_database(self.handle_create_goal)
@@ -1385,8 +1486,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
+    def do_PUT(self) -> None:
+        path_parts = [unquote(part) for part in urlparse(self.path).path.split("/") if part]
+        if len(path_parts) == 4 and path_parts[:2] == ["api", "documents"]:
+            self.handle_documents(lambda: self.handle_save_document(path_parts[2], path_parts[3]))
+            return
+        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+
     def do_DELETE(self) -> None:
-        path_parts = [part for part in urlparse(self.path).path.split("/") if part]
+        path_parts = [unquote(part) for part in urlparse(self.path).path.split("/") if part]
+        if len(path_parts) == 4 and path_parts[:2] == ["api", "documents"]:
+            self.handle_documents(lambda: self.handle_delete_document(path_parts[2], path_parts[3]))
+            return
         if len(path_parts) == 3 and path_parts[:2] == ["api", "notes"]:
             self.handle_database(lambda: self.handle_delete_note(path_parts[2]))
             return
@@ -1593,6 +1704,85 @@ class DashboardHandler(BaseHTTPRequestHandler):
         deleted = clear_done_tasks()
         self.send_json({"ok": True, "deleted": deleted})
 
+    def validated_document_target(self, raw_agent: str, raw_filename: str) -> tuple[tuple[str, str] | None, str | None]:
+        agent, error = validate_path_segment(raw_agent, "agent")
+        if error:
+            return None, error
+        filename, error = validate_document_filename(raw_filename)
+        if error:
+            return None, error
+        return (agent, filename), None
+
+    def handle_read_document(self, raw_agent: str, raw_filename: str) -> None:
+        target, error = self.validated_document_target(raw_agent, raw_filename)
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        agent, filename = target
+        document = read_document(agent, filename)
+        if document is None:
+            self.send_error_json(HTTPStatus.NOT_FOUND, "document not found")
+            return
+        self.send_json(document)
+
+    def handle_create_document(self, raw_agent: str) -> None:
+        agent, error = validate_path_segment(raw_agent, "agent")
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        payload, error = self.read_json_body()
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        unsupported = set(payload) - {"filename", "content"}
+        if unsupported:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, f"unsupported field: {sorted(unsupported)[0]}")
+            return
+        filename, error = validate_document_filename(payload.get("filename"))
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        content = payload.get("content")
+        if not isinstance(content, str):
+            self.send_error_json(HTTPStatus.BAD_REQUEST, "content must be a string")
+            return
+        path = safe_document_path(agent, filename)
+        if path.exists():
+            self.send_error_json(HTTPStatus.CONFLICT, "document already exists")
+            return
+        self.send_json(write_document(agent, filename, content), HTTPStatus.CREATED)
+
+    def handle_save_document(self, raw_agent: str, raw_filename: str) -> None:
+        target, error = self.validated_document_target(raw_agent, raw_filename)
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        payload, error = self.read_json_body()
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        unsupported = set(payload) - {"content"}
+        if unsupported:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, f"unsupported field: {sorted(unsupported)[0]}")
+            return
+        content = payload.get("content")
+        if not isinstance(content, str):
+            self.send_error_json(HTTPStatus.BAD_REQUEST, "content must be a string")
+            return
+        agent, filename = target
+        self.send_json(write_document(agent, filename, content))
+
+    def handle_delete_document(self, raw_agent: str, raw_filename: str) -> None:
+        target, error = self.validated_document_target(raw_agent, raw_filename)
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        agent, filename = target
+        if not delete_document(agent, filename):
+            self.send_error_json(HTTPStatus.NOT_FOUND, "document not found")
+            return
+        self.send_json({"ok": True, "deleted": True})
+
     def handle_create_goal(self) -> None:
         payload, error = self.read_json_body()
         if error:
@@ -1730,6 +1920,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             callback()
         except sqlite3.DatabaseError:
             self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, "database operation failed")
+
+    def handle_documents(self, callback) -> None:
+        try:
+            callback()
+        except (OSError, UnicodeError, ValueError):
+            self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, "document operation failed")
 
     def send_file(self, path: Path, content_type: str | None = None) -> None:
         if not path.exists() or not path.is_file():
