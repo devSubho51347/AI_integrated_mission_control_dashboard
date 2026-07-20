@@ -297,6 +297,34 @@
       color: #fff;
       font-weight: 900;
     }
+    .office-map { width: 100%; height: 100%; }
+    .office-desk .desk-shell, .office-hub {
+      fill: rgba(18,18,24,.86);
+      stroke: #2c2c34;
+      stroke-width: 1.5;
+    }
+    .office-desk[data-state="live"] .desk-shell { stroke: var(--green); filter: drop-shadow(0 0 16px rgba(25,209,159,.75)); }
+    .office-desk[data-state="active"] .desk-shell { stroke: var(--blue); filter: drop-shadow(0 0 11px rgba(75,147,255,.52)); }
+    .office-desk[data-state="recent"] .desk-shell { stroke: var(--orange); filter: drop-shadow(0 0 7px rgba(255,121,0,.34)); }
+    .office-desk[data-state="offline"] { opacity: .55; }
+    .desk-screen { fill: #17171c; stroke: #303038; }
+    .office-desk[data-state="live"] .desk-screen { fill: rgba(25,209,159,.7); }
+    .office-desk[data-state="active"] .desk-screen { fill: rgba(75,147,255,.48); }
+    .office-desk[data-state="recent"] .desk-screen { fill: rgba(255,121,0,.24); }
+    .office-desk[data-state="offline"] .desk-screen { fill: #111115; }
+    .office-status { fill: #55555f; }
+    .office-desk[data-state="live"] .office-status { fill: var(--green); filter: drop-shadow(0 0 8px var(--green)); }
+    .office-desk[data-state="active"] .office-status { fill: var(--blue); }
+    .office-desk[data-state="recent"] .office-status { fill: var(--orange); }
+    .office-label { fill: #f6f6f7; font-size: 13px; font-weight: 900; }
+    .office-meta { fill: #8a8a93; font-size: 11px; }
+    .office-agent .agent-body { fill: var(--agent); filter: drop-shadow(0 0 10px color-mix(in srgb, var(--agent), transparent 30%)); }
+    .office-agent[data-phase="idle"][data-state="offline"] { opacity: .45; }
+    .office-agent text { fill: #fff; font-size: 11px; font-weight: 900; text-anchor: middle; dominant-baseline: middle; }
+    .office-bubble rect { fill: rgba(10,10,12,.94); stroke: rgba(255,121,0,.58); }
+    .office-bubble text { fill: #f6f6f7; font-size: 12px; font-weight: 800; }
+    .hub-title { fill: var(--orange); font-size: 18px; font-weight: 900; text-anchor: middle; }
+    .hub-seat { fill: rgba(255,121,0,.08); stroke: rgba(255,121,0,.28); stroke-dasharray: 4 5; }
 
     .toolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 18px; }
     .search { flex: 1; height: 42px; padding: 0 14px; border: 1px solid var(--line); border-radius: 7px; background: #111115; }
@@ -485,7 +513,7 @@
         <button class="icon-btn" title="Messages">[]</button>
         <button class="icon-btn" title="Refresh">R</button>
         <button class="icon-btn" title="Alerts">!</button>
-        <span class="pill">v0.2.3</span>
+        <span class="pill">v0.2.4</span>
         <span class="dot"></span>
         <span>System Online</span>
       </div>
@@ -595,6 +623,8 @@
     let selectedTaskCategory = "";
     let CONTENT_DATA = { documents: [], selected: null };
     let selectedDocumentKey = null;
+    let OFFICE_TELEMETRY = { sessions: [], activity: [] };
+    const OFFICE_RUNTIME = { agents: {}, sessionSizes: {}, seenLogIds: new Set(), baseline: false, timer: null, activeView: false, pipelineStage: null };
 
     const pageIds = MOCK_DATA.pages.map(p => p.toLowerCase());
     const nav = document.getElementById("nav");
@@ -741,32 +771,214 @@
         `<div class="tabs"><button class="active" data-agent-view="overview">Overview</button><button data-agent-view="office">The Office</button></div><div id="agent-view">` + agentsOverview() + `</div>`;
       document.querySelectorAll("[data-agent-view]").forEach(button => button.addEventListener("click", () => {
         document.querySelectorAll("[data-agent-view]").forEach(b => b.classList.toggle("active", b === button));
-        document.getElementById("agent-view").innerHTML = button.dataset.agentView === "office" ? officeView() : agentsOverview();
+        OFFICE_RUNTIME.activeView = button.dataset.agentView === "office";
+        document.getElementById("agent-view").innerHTML = OFFICE_RUNTIME.activeView ? officeView() : agentsOverview();
+        if (OFFICE_RUNTIME.activeView) startOfficePolling();
       }));
     }
 
+    const officeDeskPositions = [
+      { x: 95, y: 78 }, { x: 315, y: 78 }, { x: 535, y: 78 }, { x: 755, y: 78 },
+      { x: 95, y: 438 }, { x: 315, y: 438 }, { x: 535, y: 438 }, { x: 755, y: 438 }
+    ];
+    const officeHubSeats = [
+      { x: 430, y: 270 }, { x: 505, y: 270 }, { x: 580, y: 270 }, { x: 655, y: 270 },
+      { x: 430, y: 342 }, { x: 505, y: 342 }, { x: 580, y: 342 }, { x: 655, y: 342 }
+    ];
+
+    const agentKey = value => String(value || "").trim().toLowerCase();
+    const easeOutCubic = value => 1 - Math.pow(1 - value, 3);
+    const truncateText = (value, max = 44) => String(value || "").length > max ? `${String(value).slice(0, max - 1)}...` : String(value || "");
+
+    async function officeRequest(url) {
+      const response = await fetch(url, { cache: "no-store" });
+      if (!response.ok) throw new Error((await response.json()).error?.message || "Office request failed");
+      return response.json();
+    }
+
+    function officeAgentState(agent) {
+      const latest = (OFFICE_TELEMETRY.activity || []).find(event => agentKey(event.agent) === agentKey(agent.name) || agentKey(event.agent_name) === agentKey(agent.name));
+      const parsed = latest?.created_at ? new Date(latest.created_at) : null;
+      if (!parsed || Number.isNaN(parsed.getTime())) return "offline";
+      const ageMinutes = (Date.now() - parsed.getTime()) / 60000;
+      if (ageMinutes <= 5) return "live";
+      if (ageMinutes <= 60) return "active";
+      if (ageMinutes <= 1440) return "recent";
+      return "offline";
+    }
+
+    function officeRuntimeFor(agent, index) {
+      const key = agentKey(agent.name);
+      const desk = officeDeskPositions[index % officeDeskPositions.length];
+      const hub = officeHubSeats[index % officeHubSeats.length];
+      if (!OFFICE_RUNTIME.agents[key]) {
+        OFFICE_RUNTIME.agents[key] = { phase: "idle", x: desk.x, y: desk.y, desk, hub, message: "", messageUntil: 0, zoneStartedAt: 0 };
+      }
+      const runtime = OFFICE_RUNTIME.agents[key];
+      runtime.desk = desk;
+      runtime.hub = hub;
+      return runtime;
+    }
+
+    function startOfficeMove(agentName, phase, message, duration) {
+      const key = agentKey(agentName);
+      const runtime = OFFICE_RUNTIME.agents[key];
+      if (!runtime) return;
+      const destination = phase === "walking_out" ? runtime.hub : runtime.desk;
+      runtime.phase = phase;
+      runtime.from = { x: runtime.x, y: runtime.y };
+      runtime.to = destination;
+      runtime.startedAt = performance.now();
+      runtime.duration = duration;
+      runtime.message = message;
+      runtime.messageUntil = Date.now() + (phase === "walking_back" ? 5000 : 0);
+    }
+
+    function triggerOfficeWalkOut(agentName) {
+      const runtime = OFFICE_RUNTIME.agents[agentKey(agentName)];
+      if (!runtime || runtime.phase === "walking_out" || runtime.phase === "at_zone") return;
+      startOfficeMove(agentName, "walking_out", "Working...", 1200);
+    }
+
+    function triggerOfficeWalkBack(agentName, taskDescription) {
+      const runtime = OFFICE_RUNTIME.agents[agentKey(agentName)];
+      if (!runtime) return;
+      startOfficeMove(agentName, "walking_back", `Done: ${truncateText(taskDescription, 52)}`, 1000);
+    }
+
+    function advanceOfficeRuntime() {
+      const now = performance.now();
+      Object.values(OFFICE_RUNTIME.agents).forEach(runtime => {
+        if (runtime.phase === "walking_out" || runtime.phase === "walking_back") {
+          const progress = Math.min(1, (now - runtime.startedAt) / runtime.duration);
+          const eased = easeOutCubic(progress);
+          runtime.x = runtime.from.x + (runtime.to.x - runtime.from.x) * eased;
+          runtime.y = runtime.from.y + (runtime.to.y - runtime.from.y) * eased;
+          if (progress >= 1) {
+            runtime.x = runtime.to.x;
+            runtime.y = runtime.to.y;
+            if (runtime.phase === "walking_out") {
+              runtime.phase = "at_zone";
+              runtime.zoneStartedAt = Date.now();
+              runtime.message = "Working...";
+            } else {
+              runtime.phase = "idle";
+            }
+          }
+        }
+        if (runtime.phase === "at_zone" && runtime.zoneStartedAt && Date.now() - runtime.zoneStartedAt > 90000) {
+          startOfficeMove(Object.keys(OFFICE_RUNTIME.agents).find(key => OFFICE_RUNTIME.agents[key] === runtime), "walking_back", "Back at desk", 1000);
+        }
+      });
+    }
+
+    function detectOfficeEvents(sessions, activity) {
+      const sizes = {};
+      sessions.forEach(session => {
+        const key = agentKey(session.agent);
+        sizes[key] = Number(session.total_size_kb) || 0;
+        const previous = OFFICE_RUNTIME.sessionSizes[key];
+        if (OFFICE_RUNTIME.baseline && previous !== undefined && sizes[key] > previous + 0.01) {
+          triggerOfficeWalkOut(session.agent);
+        }
+      });
+      OFFICE_RUNTIME.sessionSizes = sizes;
+      activity.forEach(event => {
+        const logId = String(event.id);
+        if (OFFICE_RUNTIME.baseline && !OFFICE_RUNTIME.seenLogIds.has(logId)) {
+          triggerOfficeWalkBack(event.agent, event.task_description);
+        }
+        OFFICE_RUNTIME.seenLogIds.add(logId);
+      });
+      const pipeline = window.CONTENT_PIPELINE || MOCK_DATA.pipeline;
+      const pipelineStage = pipeline?.currentStage || pipeline?.stage;
+      const pipelineAgent = pipeline?.assignedAgent || pipelineStage?.agent || pipelineStage?.owner;
+      const pipelineKey = pipelineStage ? JSON.stringify({ stage: pipelineStage.name || pipelineStage.id || pipelineStage, agent: pipelineAgent }) : null;
+      if (OFFICE_RUNTIME.baseline && pipelineKey && pipelineKey !== OFFICE_RUNTIME.pipelineStage && pipelineAgent) {
+        triggerOfficeWalkOut(pipelineAgent);
+      }
+      OFFICE_RUNTIME.pipelineStage = pipelineKey;
+      OFFICE_RUNTIME.baseline = true;
+    }
+
+    async function pollOfficeTelemetry() {
+      if (location.protocol === "file:") return;
+      try {
+        const [sessions, activity] = await Promise.all([officeRequest("/api/agent-sessions"), officeRequest("/api/agent-activity")]);
+        OFFICE_TELEMETRY = { sessions, activity };
+        detectOfficeEvents(sessions, activity);
+        if (OFFICE_RUNTIME.activeView) renderOffice();
+      } catch (error) {
+        console.error("Unable to refresh office telemetry", error);
+      }
+    }
+
+    function startOfficePolling() {
+      pollOfficeTelemetry();
+      if (!OFFICE_RUNTIME.timer) {
+        OFFICE_RUNTIME.timer = setInterval(pollOfficeTelemetry, 3500);
+        requestAnimationFrame(officeAnimationFrame);
+      }
+    }
+
+    function officeAnimationFrame() {
+      advanceOfficeRuntime();
+      if (OFFICE_RUNTIME.activeView) renderOffice();
+      if (OFFICE_RUNTIME.timer) requestAnimationFrame(officeAnimationFrame);
+    }
+
     function officeView() {
-      const positions = [
-        { type: "desk", style: "left:8%;top:12%" },
-        { type: "desk", style: "left:28%;top:12%" },
-        { type: "desk", style: "left:48%;top:12%" },
-        { type: "desk", style: "left:8%;top:44%" },
-        { type: "desk", style: "left:60%;top:44%" },
-        { type: "desk", style: "left:42%;top:74%" }
-      ];
-      const desks = MOCK_DATA.agents.slice(0, 6).map((agent, index) => {
-        const position = positions[index];
-        return `<div class="${position.type}" style="${position.style}">${agent.name}<div class="agent-dot" style="--agent:${agent.color}">${agent.icon}</div><p>${agent.active}</p></div>`;
-      }).join("");
-      const roomAgent = MOCK_DATA.agents[6];
-      const room = roomAgent ? `<div class="room"><strong>${roomAgent.name}</strong><div class="agent-dot" style="--agent:${roomAgent.color};margin-top:210px">${roomAgent.icon}</div><h3>${roomAgent.name}</h3><p>${roomAgent.active}</p></div>` : "";
-      const latest = MOCK_DATA.activity.events?.[0];
       return section("HQ", "The Office", "Live view of your agent HQ - desks light up on activity") +
-        `<div class="office">
-          ${desks}
-          <div class="hub"><strong>WORKING HUB</strong><p style="margin-top:40px;color:#fff">${latest ? latest[1] : "No recent log activity"}</p></div>
-          ${room}
-        </div>`;
+        `<div class="office" id="office-host">${renderOfficeSvg()}</div>`;
+    }
+
+    function renderOffice() {
+      const host = document.getElementById("office-host");
+      if (host) host.innerHTML = renderOfficeSvg();
+    }
+
+    function renderOfficeSvg() {
+      const agents = MOCK_DATA.agents || [];
+      const desks = agents.map((agent, index) => {
+        const state = officeAgentState(agent);
+        const runtime = officeRuntimeFor(agent, index);
+        const desk = runtime.desk;
+        return `<g class="office-desk" data-state="${state}" transform="translate(${desk.x},${desk.y})">
+          <rect class="desk-shell" x="-58" y="-32" width="116" height="70" rx="8"></rect>
+          <rect class="desk-screen" x="-34" y="-20" width="68" height="31" rx="5"></rect>
+          <circle class="office-status" cx="45" cy="-21" r="5"></circle>
+          <text class="office-label" x="0" y="55" text-anchor="middle">${escapeHtml(agent.name)}</text>
+          <text class="office-meta" x="0" y="72" text-anchor="middle">${state.toUpperCase()}</text>
+        </g>`;
+      }).join("");
+      const figures = agents.map((agent, index) => {
+        const state = officeAgentState(agent);
+        const runtime = officeRuntimeFor(agent, index);
+        const showBubble = runtime.phase === "walking_out" || runtime.phase === "at_zone" || runtime.phase === "walking_back" || Date.now() < runtime.messageUntil;
+        const bubble = showBubble ? `<g class="office-bubble" transform="translate(${runtime.x - 56},${runtime.y - 72})"><rect width="112" height="34" rx="8"></rect><text x="56" y="21" text-anchor="middle">${escapeHtml(truncateText(runtime.message, 24))}</text></g>` : "";
+        return `<g class="office-agent" data-phase="${runtime.phase}" data-state="${state}" style="--agent:${agent.color}" transform="translate(${runtime.x},${runtime.y})">
+          <circle class="agent-body" r="18"></circle>
+          <text y="1">${escapeHtml(agent.icon)}</text>
+        </g>${bubble}`;
+      }).join("");
+      const seats = officeHubSeats.slice(0, agents.length).map(seat => `<circle class="hub-seat" cx="${seat.x}" cy="${seat.y}" r="24"></circle>`).join("");
+      const latest = OFFICE_TELEMETRY.activity?.[0];
+      return `<svg class="office-map" viewBox="0 0 980 620" role="img" aria-label="Live office view of agent desks and the working hub">
+        <defs>
+          <pattern id="office-grid" width="64" height="64" patternUnits="userSpaceOnUse">
+            <path d="M 64 0 L 0 0 0 64" fill="none" stroke="rgba(255,255,255,.035)" stroke-width="1"></path>
+          </pattern>
+        </defs>
+        <rect width="980" height="620" fill="#08080a"></rect>
+        <rect width="980" height="620" fill="url(#office-grid)"></rect>
+        <circle cx="520" cy="320" r="310" fill="rgba(255,121,0,.055)"></circle>
+        <rect class="office-hub" x="365" y="205" width="355" height="190" rx="12"></rect>
+        <text class="hub-title" x="542" y="238">WORKING HUB</text>
+        <text class="office-meta" x="542" y="378" text-anchor="middle">${escapeHtml(latest ? truncateText(latest.task_description, 72) : "No recent log activity")}</text>
+        ${seats}
+        ${desks}
+        ${figures}
+      </svg>`;
     }
 
     async function taskRequest(url, options = {}) {

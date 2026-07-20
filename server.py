@@ -499,10 +499,10 @@ def load_agent_logs() -> dict:
         con.row_factory = sqlite3.Row
         table = agent_log_table(con)
         if table is None:
-            return logs
+            return {"by_agent": logs, "events": events}
         rows = con.execute(
             f"""
-            SELECT agent_name, task_description, model_used, status, created_at
+            SELECT rowid AS id, agent_name, task_description, model_used, status, created_at
             FROM {table}
             ORDER BY created_at ASC
             """
@@ -524,6 +524,79 @@ def load_agent_logs() -> dict:
         if latest is None or (row["created_at"] or "") >= (latest["created_at"] or ""):
             stats["latest"] = event
     return {"by_agent": logs, "events": events}
+
+
+def agent_session_dirs(agent_id: str) -> list[Path]:
+    base = OPENCLAW_DIR / "agents" / agent_id
+    return [
+        base / "sessions",
+        base / "agent" / "codex-home" / "sessions",
+    ]
+
+
+def session_tree_stats(paths: list[Path]) -> dict:
+    total_size = 0
+    file_count = 0
+    latest_mtime = None
+    for root in paths:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            total_size += stat.st_size
+            file_count += 1
+            if latest_mtime is None or stat.st_mtime > latest_mtime:
+                latest_mtime = stat.st_mtime
+    return {
+        "total_size_kb": round(total_size / 1024, 2),
+        "file_count": file_count,
+        "latest_modified_at": datetime.fromtimestamp(latest_mtime, timezone.utc).isoformat(timespec="seconds") if latest_mtime else None,
+    }
+
+
+def list_agent_sessions() -> list[dict]:
+    sessions = []
+    for agent in configured_dashboard_agents():
+        stats = session_tree_stats(agent_session_dirs(agent["id"]))
+        sessions.append(
+            {
+                "agent_id": agent["id"],
+                "agent": agent["name"],
+                **stats,
+            }
+        )
+    return sessions
+
+
+def list_agent_activity(limit: int = 200) -> list[dict]:
+    configured_agents = configured_dashboard_agents()
+    names_by_key = {}
+    for agent in configured_agents:
+        names_by_key[agent["id"].lower()] = agent["name"]
+        names_by_key[agent["name"].lower()] = agent["name"]
+    events = []
+    for event in load_agent_logs()["events"]:
+        raw_name = (event.get("agent_name") or "").strip()
+        display_name = names_by_key.get(raw_name.lower(), raw_name)
+        if configured_agents and display_name not in {agent["name"] for agent in configured_agents}:
+            continue
+        events.append(
+            {
+                "id": event.get("id"),
+                "agent": display_name,
+                "agent_name": raw_name,
+                "task_description": event.get("task_description") or "",
+                "status": event.get("status") or "",
+                "created_at": event.get("created_at") or "",
+            }
+        )
+    events.sort(key=lambda item: item["created_at"], reverse=True)
+    return events[:limit]
 
 
 def status_bucket(status: str | None) -> str:
@@ -1378,7 +1451,7 @@ def get_payload(key: str) -> dict:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "AgentDashboard/0.2.2"
+    server_version = "AgentDashboard/0.2.4"
 
     def log_message(self, fmt: str, *args: object) -> None:
         message = "%s - %s\n" % (self.log_date_time_string(), fmt % args)
@@ -1404,6 +1477,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/bootstrap":
             self.send_json(get_payload("bootstrap"))
+            return
+        if path == "/api/agent-sessions":
+            self.send_json(list_agent_sessions())
+            return
+        if path == "/api/agent-activity":
+            self.send_json(list_agent_activity())
             return
         if path == "/api/tasks":
             query = parse_qs(parsed_url.query)

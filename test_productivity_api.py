@@ -3,6 +3,7 @@ import calendar
 import tempfile
 import threading
 import unittest
+import sqlite3
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -16,9 +17,16 @@ class ProductivityApiTests(unittest.TestCase):
         self.original_data_dir = server.DATA_DIR
         self.original_db_path = server.DB_PATH
         self.original_docs_dir = server.DOCS_DIR
+        self.original_openclaw_dir = server.OPENCLAW_DIR
+        self.original_openclaw_config_path = server.OPENCLAW_CONFIG_PATH
+        self.original_agent_logs_db_path = server.AGENT_LOGS_DB_PATH
         server.DATA_DIR = Path(self.temp_dir.name)
         server.DB_PATH = server.DATA_DIR / "dashboard.db"
         server.DOCS_DIR = Path(self.temp_dir.name) / "docs"
+        server.OPENCLAW_DIR = Path(self.temp_dir.name) / "openclaw"
+        server.OPENCLAW_CONFIG_PATH = server.OPENCLAW_DIR / "openclaw.json"
+        server.AGENT_LOGS_DB_PATH = server.OPENCLAW_DIR / "agent-logs.db"
+        self.create_openclaw_fixture()
         server.init_db()
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), server.DashboardHandler)
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
@@ -32,6 +40,9 @@ class ProductivityApiTests(unittest.TestCase):
         server.DATA_DIR = self.original_data_dir
         server.DB_PATH = self.original_db_path
         server.DOCS_DIR = self.original_docs_dir
+        server.OPENCLAW_DIR = self.original_openclaw_dir
+        server.OPENCLAW_CONFIG_PATH = self.original_openclaw_config_path
+        server.AGENT_LOGS_DB_PATH = self.original_agent_logs_db_path
         self.temp_dir.cleanup()
 
     def request(self, method, path, payload=None):
@@ -75,6 +86,20 @@ class ProductivityApiTests(unittest.TestCase):
         path = server.DOCS_DIR / agent
         path.mkdir(parents=True, exist_ok=True)
         (path / filename).write_text(content, encoding="utf-8")
+
+    def create_openclaw_fixture(self):
+        agents = [
+            {"id": "scout", "name": "Scout", "identity": {"theme": "Research"}, "model": "test-scout"},
+            {"id": "scribe", "name": "Scribe", "identity": {"theme": "Writing"}, "model": "test-scribe"},
+        ]
+        for agent in agents:
+            (server.OPENCLAW_DIR / "agents" / agent["id"] / "sessions").mkdir(parents=True, exist_ok=True)
+            (server.OPENCLAW_DIR / "agents" / agent["id"] / "agent" / "codex-home" / "sessions").mkdir(parents=True, exist_ok=True)
+        server.OPENCLAW_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        server.OPENCLAW_CONFIG_PATH.write_text(
+            json.dumps({"agents": {"defaults": {"model": {"primary": "test-model"}}, "list": agents}}),
+            encoding="utf-8",
+        )
 
     def test_fetching_seeded_notes(self):
         status, payload = self.request("GET", "/api/notes")
@@ -158,6 +183,50 @@ class ProductivityApiTests(unittest.TestCase):
         status, payload = self.request("PATCH", "/api/tasks/1", {"status": "blocked"})
         self.assertEqual(status, 400)
         self.assertIn("status", payload["error"]["message"])
+
+    def test_agent_sessions_report_total_session_file_size(self):
+        session_file = server.OPENCLAW_DIR / "agents" / "scout" / "sessions" / "session.jsonl"
+        session_file.write_text("abcd", encoding="utf-8")
+        codex_session = server.OPENCLAW_DIR / "agents" / "scout" / "agent" / "codex-home" / "sessions" / "rollout.jsonl"
+        codex_session.write_text("efghij", encoding="utf-8")
+
+        status, payload = self.request("GET", "/api/agent-sessions")
+        self.assertEqual(status, 200)
+        scout = next(agent for agent in payload if agent["agent"] == "Scout")
+        self.assertEqual(scout["agent_id"], "scout")
+        self.assertEqual(scout["file_count"], 2)
+        self.assertGreater(scout["total_size_kb"], 0)
+
+    def test_agent_activity_returns_log_ids_and_task_descriptions(self):
+        server.AGENT_LOGS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(server.AGENT_LOGS_DB_PATH)
+        try:
+            con.execute(
+                """
+                CREATE TABLE agent_logs (
+                    agent_name TEXT NOT NULL,
+                    task_description TEXT NOT NULL,
+                    model_used TEXT,
+                    status TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            con.execute(
+                """
+                INSERT INTO agent_logs (agent_name, task_description, model_used, status, created_at)
+                VALUES ('Scout', 'Finished signal scan', 'test-model', 'completed', '2026-07-20T10:00:00+00:00')
+                """
+            )
+            con.commit()
+        finally:
+            con.close()
+
+        status, payload = self.request("GET", "/api/agent-activity")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload[0]["agent"], "Scout")
+        self.assertEqual(payload[0]["task_description"], "Finished signal scan")
+        self.assertIn("id", payload[0])
 
     def test_listing_documents_uses_existing_agent_files_without_body(self):
         self.write_doc_file("scout", "market-brief.md", "# Market Brief\n\nSignals.")
