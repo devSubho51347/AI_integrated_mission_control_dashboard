@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import copy
 import json
 import mimetypes
@@ -920,12 +921,15 @@ def productivity_context(today: datetime | None = None) -> dict:
     current = (today or datetime.now().astimezone()).date()
     week_start = current - timedelta(days=current.weekday())
     week_end = week_start + timedelta(days=6)
+    _, month_days = calendar.monthrange(current.year, current.month)
+    month_start = current.replace(day=1)
     return {
         "today": current.strftime("%Y-%m-%d"),
         "monthName": current.strftime("%B"),
         "weekNumber": current.isocalendar().week,
         "weekRange": f"{week_start.strftime('%b %-d') if os.name != 'nt' else week_start.strftime('%b %#d')} - {week_end.strftime('%b %-d, %Y') if os.name != 'nt' else week_end.strftime('%b %#d, %Y')}",
         "weekDates": [week_start + timedelta(days=offset) for offset in range(7)],
+        "monthDates": [month_start + timedelta(days=offset) for offset in range(month_days)],
     }
 
 
@@ -940,13 +944,7 @@ def build_productivity_state(anchor_date: str | None = None) -> dict:
     defaults = items_by_scope["default"]
     default_ids = [item["id"] for item in defaults]
     week_date_keys = [day.strftime("%Y-%m-%d") for day in context["weekDates"]]
-    today_date = datetime.strptime(context["today"], "%Y-%m-%d").date()
-    current_month = today_date.replace(day=1)
-    month_date_keys = []
-    cursor = current_month
-    while cursor <= today_date:
-        month_date_keys.append(cursor.strftime("%Y-%m-%d"))
-        cursor += timedelta(days=1)
+    month_date_keys = [day.strftime("%Y-%m-%d") for day in context["monthDates"]]
     date_keys = sorted(set(week_date_keys + month_date_keys))
     progress: dict[str, dict[int, bool]] = {date_key: {} for date_key in date_keys}
     if default_ids:
@@ -978,10 +976,29 @@ def build_productivity_state(anchor_date: str | None = None) -> dict:
         )
     today_done = progress.get(context["today"], {})
     today_count = sum(1 for item in defaults if today_done.get(item["id"], False))
-    month_values = []
+    month_progress = []
     for date_key in month_date_keys:
         values = progress.get(date_key, {})
-        month_values.append(round((sum(1 for item in defaults if values.get(item["id"], False)) / len(defaults)) * 100) if defaults else 0)
+        note = get_productivity_note(date_key)
+        custom_total = len(note["items"])
+        custom_completed = sum(1 for item in note["items"] if item.get("completed"))
+        default_total = len(defaults)
+        default_completed = sum(1 for item in defaults if values.get(item["id"], False))
+        total_tasks = default_total + custom_total
+        total_completed = default_completed + custom_completed
+        date_value = datetime.strptime(date_key, "%Y-%m-%d")
+        month_progress.append(
+            {
+                "date": date_key,
+                "label": date_value.strftime("%b %#d" if os.name == "nt" else "%b %-d"),
+                "day": date_value.day,
+                "defaultCompleted": default_completed,
+                "defaultTotal": default_total,
+                "customCompleted": custom_completed,
+                "customTotal": custom_total,
+                "value": round(total_completed / total_tasks, 3) if total_tasks else 0,
+            }
+        )
     return {
         "monthly": items_by_scope["monthly"],
         "weekly": items_by_scope["weekly"],
@@ -992,7 +1009,7 @@ def build_productivity_state(anchor_date: str | None = None) -> dict:
         "weekRange": context["weekRange"],
         "weekDays": week_days,
         "todayCompleted": today_count,
-        "monthProgress": month_values[-14:] or [0],
+        "monthProgress": month_progress,
         "selectedNote": get_productivity_note(context["today"]),
     }
 
@@ -1012,7 +1029,7 @@ def get_payload(key: str) -> dict:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "AgentDashboard/0.1.8"
+    server_version = "AgentDashboard/0.1.9"
 
     def log_message(self, fmt: str, *args: object) -> None:
         message = "%s - %s\n" % (self.log_date_time_string(), fmt % args)

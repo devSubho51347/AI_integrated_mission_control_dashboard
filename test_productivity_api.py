@@ -1,4 +1,5 @@
 import json
+import calendar
 import tempfile
 import threading
 import unittest
@@ -177,6 +178,7 @@ class ProductivityApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("monthName", payload)
         self.assertIn("weekNumber", payload)
+        self.assertEqual(len(payload["monthProgress"]), calendar.monthrange(2026, 7)[1])
         self.assertEqual(len(payload["monthly"]), 5)
         self.assertEqual(len(payload["weekly"]), 5)
         self.assertEqual(len(payload["defaults"]), 6)
@@ -230,6 +232,14 @@ class ProductivityApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["title"], "Planning")
         self.assertEqual(len(payload["items"]), 2)
+
+        status, state = self.request("GET", "/api/productivity?date=2026-07-20")
+        self.assertEqual(status, 200)
+        day_stats = next(record for record in state["monthProgress"] if record["date"] == "2026-07-20")
+        self.assertEqual(day_stats["customCompleted"], 1)
+        self.assertEqual(day_stats["customTotal"], 2)
+        self.assertGreaterEqual(day_stats["value"], 0)
+        self.assertLessEqual(day_stats["value"], 1)
 
         status, payload = self.request(
             "PATCH",

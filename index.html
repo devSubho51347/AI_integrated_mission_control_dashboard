@@ -444,6 +444,8 @@
     .note-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
     .note-editor { display: grid; gap: 12px; }
     .note-item span { min-width: 0; overflow-wrap: anywhere; }
+    .chart-legend { display: flex; gap: 16px; margin-top: 12px; color: var(--muted); font-size: 12px; font-weight: 800; }
+    .legend-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 7px; background: var(--orange); }
 
     .data-note {
       margin-top: 30px;
@@ -483,7 +485,7 @@
         <button class="icon-btn" title="Messages">[]</button>
         <button class="icon-btn" title="Refresh">R</button>
         <button class="icon-btn" title="Alerts">!</button>
-        <span class="pill">v0.1.8</span>
+        <span class="pill">v0.1.9</span>
         <span class="dot"></span>
         <span>System Online</span>
       </div>
@@ -653,6 +655,45 @@
       </svg>`;
     }
 
+    function productivityMonthChart(records = []) {
+      const points = records.map((record, index) => typeof record === "number" ? {
+        date: "",
+        label: `Day ${index + 1}`,
+        day: index + 1,
+        defaultCompleted: 0,
+        defaultTotal: 0,
+        customCompleted: 0,
+        customTotal: 0,
+        value: Math.max(0, Math.min(1, record / 100))
+      } : record);
+      const width = 980;
+      const height = 250;
+      const left = 58;
+      const right = 24;
+      const top = 18;
+      const bottom = 42;
+      const plotWidth = width - left - right;
+      const plotHeight = height - top - bottom;
+      const xFor = index => left + (points.length <= 1 ? 0 : (index / (points.length - 1)) * plotWidth);
+      const yFor = value => top + (1 - Math.max(0, Math.min(1, Number(value) || 0))) * plotHeight;
+      const coords = points.map((point, index) => `${xFor(index).toFixed(2)},${yFor(point.value).toFixed(2)}`).join(" ");
+      const yTicks = [0, 0.25, 0.5, 0.75, 1];
+      const xLabels = points.filter((point, index) => index === 0 || index === points.length - 1 || (point.day || index + 1) % 5 === 0);
+      return `<svg viewBox="0 0 ${width} ${height}" aria-label="Daily default and custom task completion for the month">
+        <g stroke="#24242b" stroke-width="1">${yTicks.map(tick => `<line x1="${left}" x2="${width - right}" y1="${yFor(tick)}" y2="${yFor(tick)}" />`).join("")}</g>
+        <line x1="${left}" x2="${left}" y1="${top}" y2="${height - bottom}" stroke="#3a3a43" />
+        <line x1="${left}" x2="${width - right}" y1="${height - bottom}" y2="${height - bottom}" stroke="#3a3a43" />
+        ${yTicks.map(tick => `<text x="18" y="${yFor(tick) + 4}" fill="#888">${tick === 0 || tick === 1 ? tick.toFixed(0) : tick.toFixed(2)}</text>`).join("")}
+        <polyline fill="none" stroke="var(--orange)" stroke-width="4" points="${coords}" />
+        ${points.map((point, index) => {
+          const value = Math.max(0, Math.min(1, Number(point.value) || 0));
+          const label = `${point.label || point.date}\nCompletion: ${value.toFixed(2)}\nDefault tasks: ${point.defaultCompleted || 0}/${point.defaultTotal || 0}\nCustom tasks: ${point.customCompleted || 0}/${point.customTotal || 0}`;
+          return `<circle cx="${xFor(index).toFixed(2)}" cy="${yFor(value).toFixed(2)}" r="5" fill="var(--orange)" tabindex="0" aria-label="${escapeHtml(label)}"><title>${escapeHtml(label)}</title></circle>`;
+        }).join("")}
+        ${xLabels.map((point, index) => `<text x="${xFor(points.indexOf(point)) - (index === 0 ? 0 : 12)}" y="${height - 12}" fill="#888">${point.day || ""}</text>`).join("")}
+      </svg><div class="chart-legend"><span><i class="legend-dot"></i>Daily completion ratio</span><span>Hover points for default/custom task counts</span></div>`;
+    }
+
     function agentsGrid() {
       return `<div class="grid agent-grid">${MOCK_DATA.agents.map(a => `
         <article class="card agent-card" style="--agent:${a.color}">
@@ -777,6 +818,8 @@
 
     function embeddedProductivityData() {
       const source = MOCK_DATA.productivity || {};
+      const now = new Date();
+      const monthLength = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
       const normalize = (scope, items = [], completed = 0) => items.map((body, index) => ({
         id: `${scope}-${index}`,
         scope,
@@ -793,7 +836,16 @@
         weekRange: source.weekRange || "Current Week",
         weekDays: source.weekDays || [],
         todayCompleted: 0,
-        monthProgress: [60, 65, 78, 68, 74, 62, 70],
+        monthProgress: Array.from({ length: monthLength }, (_, index) => ({
+          date: "",
+          label: `Day ${index + 1}`,
+          day: index + 1,
+          defaultCompleted: 0,
+          defaultTotal: source.defaults?.length || 0,
+          customCompleted: 0,
+          customTotal: 0,
+          value: 0
+        })),
         selectedNote: { title: "", items: [] }
       };
     }
@@ -893,14 +945,14 @@
         <td>${progressCell(day.done || [])}</td>
         <td><span class="note-link" data-note-date="${day.dateKey || ""}">${day.notes ? "Edit Note" : "Add Note"}</span></td>
       </tr>`).join("");
-      const monthSeries = productivityData.monthProgress?.length ? productivityData.monthProgress : [0];
+      const monthSeries = productivityData.monthProgress?.length ? productivityData.monthProgress : [];
       document.getElementById("productivity").innerHTML = title("P", "Weekly Planner", "Goals, habits, notes, and daily progress.") +
         `<div class="grid cols-3">
           ${productivityCard("monthly", "Monthly Goals", productivityData.monthName || "This Month", "accent-purple", "var(--purple)")}
           ${productivityCard("weekly", "Weekly Goals", `Week ${productivityData.weekNumber || ""}`.trim(), "accent-green", "var(--green)")}
           ${productivityCard("defaults", "Default Daily Tasks", `${productivityData.todayCompleted || 0} / ${defaultTasks.length} today`, "accent-orange", "var(--orange)")}
         </div>
-        ${section("C", `Daily Default Task Progress - ${escapeHtml(productivityData.monthName || "This Month")}`)}<div class="card chart-card">${lineChart(monthSeries, monthSeries)}</div>
+        ${section("C", `Daily Default Task Progress - ${escapeHtml(productivityData.monthName || "This Month")}`)}<div class="card chart-card">${productivityMonthChart(monthSeries)}</div>
         <div class="planner-tools">
           ${section("W", "Default Entire Week", "Track every default daily task across the selected week.")}
           <div class="week-switcher"><button class="icon-btn" title="Previous week" data-week-shift="-7">&lt;</button><span class="week-range">Week ${productivityData.weekNumber || ""} - ${escapeHtml(productivityData.weekRange || "Current Week")}</span><button class="icon-btn" title="Next week" data-week-shift="7">&gt;</button></div>
