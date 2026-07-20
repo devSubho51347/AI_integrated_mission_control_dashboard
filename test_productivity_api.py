@@ -172,6 +172,77 @@ class ProductivityApiTests(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(payload["error"]["message"], "goal not found")
 
+    def test_fetching_productivity_state_uses_current_period_labels(self):
+        status, payload = self.request("GET", "/api/productivity")
+        self.assertEqual(status, 200)
+        self.assertIn("monthName", payload)
+        self.assertIn("weekNumber", payload)
+        self.assertEqual(len(payload["monthly"]), 5)
+        self.assertEqual(len(payload["weekly"]), 5)
+        self.assertEqual(len(payload["defaults"]), 6)
+        self.assertEqual(len(payload["weekDays"]), 7)
+
+    def test_productivity_items_can_be_created_toggled_and_deleted(self):
+        status, item = self.request("POST", "/api/productivity/items", {"scope": "monthly", "body": "Ship the planner"})
+        self.assertEqual(status, 201)
+        self.assertEqual(item["scope"], "monthly")
+        self.assertFalse(item["completed"])
+
+        status, item = self.request("PATCH", f"/api/productivity/items/{item['id']}/toggle", {})
+        self.assertEqual(status, 200)
+        self.assertTrue(item["completed"])
+
+        status, payload = self.request("DELETE", f"/api/productivity/items/{item['id']}")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["deleted"])
+
+    def test_productivity_progress_updates_default_task_for_a_day(self):
+        status, payload = self.request("GET", "/api/productivity")
+        self.assertEqual(status, 200)
+        task_id = payload["defaults"][0]["id"]
+        date_key = payload["weekDays"][0]["dateKey"]
+
+        status, progress = self.request(
+            "POST",
+            "/api/productivity/progress",
+            {"date": date_key, "item_id": task_id, "completed": True},
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(progress["completed"])
+
+        status, payload = self.request("GET", "/api/productivity")
+        self.assertEqual(status, 200)
+        day = next(day for day in payload["weekDays"] if day["dateKey"] == date_key)
+        self.assertTrue(day["done"][0])
+
+    def test_productivity_notes_can_be_saved_cleared_and_deleted(self):
+        status, payload = self.request(
+            "PATCH",
+            "/api/productivity/notes/2026-07-20",
+            {
+                "title": "Planning",
+                "items": [
+                    {"body": "Done item", "completed": True},
+                    {"body": "Open item", "completed": False},
+                ],
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["title"], "Planning")
+        self.assertEqual(len(payload["items"]), 2)
+
+        status, payload = self.request(
+            "PATCH",
+            "/api/productivity/notes/2026-07-20",
+            {"action": "clear_completed"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual([item["body"] for item in payload["items"]], ["Open item"])
+
+        status, payload = self.request("DELETE", "/api/productivity/notes/2026-07-20")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["deleted"])
+
     def test_validation_errors(self):
         status, payload = self.request("PATCH", "/api/notes/not-an-id", {"body": "Valid"})
         self.assertEqual(status, 400)

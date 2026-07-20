@@ -10,11 +10,11 @@ import mimetypes
 import os
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -39,12 +39,14 @@ AGENT_COLORS = [
 NOTE_COLOR_MIN = 0
 NOTE_COLOR_MAX = 5
 NOTE_SEED_NAME = "sticky_notes_v1"
+PRODUCTIVITY_SEED_NAME = "productivity_items_v1"
 NOTE_SEEDS = [
     ("Prepare the weekly project update before Friday standup.", 0),
     ("Review dashboard walkthrough notes and tighten the demo script.", 1),
     ("Follow up on automation ideas from the productivity planning session.", 2),
     ("Block one focused hour for inbox cleanup and task triage.", 3),
 ]
+PRODUCTIVITY_SCOPES = {"monthly", "weekly", "default"}
 
 
 DEFAULT_BOOTSTRAP = {
@@ -227,6 +229,17 @@ def row_to_goal(row: sqlite3.Row) -> dict:
     return payload
 
 
+def row_to_productivity_item(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "scope": row["scope"],
+        "body": row["body"],
+        "completed": bool(row["completed"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
 def validate_body(value: object, field_name: str = "body") -> tuple[str | None, str | None]:
     if not isinstance(value, str):
         return None, f"{field_name} must be a string"
@@ -252,6 +265,26 @@ def parse_resource_id(raw_id: str) -> tuple[int | None, str | None]:
     if parsed <= 0:
         return None, "id must be a positive integer"
     return parsed, None
+
+
+def parse_date_key(raw_date: str) -> tuple[str | None, str | None]:
+    try:
+        parsed = datetime.strptime(raw_date, "%Y-%m-%d")
+    except ValueError:
+        return None, "date must use YYYY-MM-DD"
+    return parsed.strftime("%Y-%m-%d"), None
+
+
+def validate_scope(value: object) -> tuple[str | None, str | None]:
+    if not isinstance(value, str) or value not in PRODUCTIVITY_SCOPES:
+        return None, "scope must be monthly, weekly, or default"
+    return value, None
+
+
+def validate_bool(value: object, field_name: str) -> tuple[bool | None, str | None]:
+    if not isinstance(value, bool):
+        return None, f"{field_name} must be true or false"
+    return value, None
 
 
 def parse_timestamp(value: str | None) -> datetime | None:
@@ -537,6 +570,29 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS productivity_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL CHECK (scope IN ('monthly', 'weekly', 'default')),
+                body TEXT NOT NULL,
+                completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)),
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS productivity_progress (
+                date_key TEXT NOT NULL,
+                item_id INTEGER NOT NULL,
+                completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)),
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (date_key, item_id),
+                FOREIGN KEY (item_id) REFERENCES productivity_items(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS productivity_notes (
+                date_key TEXT PRIMARY KEY,
+                title TEXT NOT NULL DEFAULT '',
+                items_json TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL
+            );
             """
         )
         row = con.execute("SELECT 1 FROM dashboard_payloads WHERE key = 'bootstrap'").fetchone()
@@ -550,6 +606,7 @@ def init_db() -> None:
                 ("server", "seed", "Initialized dashboard bootstrap payload", now_iso()),
             )
         seed_notes(con)
+        seed_productivity_items(con)
 
 
 def seed_notes(con: sqlite3.Connection) -> None:
@@ -566,6 +623,29 @@ def seed_notes(con: sqlite3.Connection) -> None:
     con.execute(
         "INSERT INTO seed_runs (name, created_at) VALUES (?, ?)",
         (NOTE_SEED_NAME, created_at),
+    )
+
+
+def seed_productivity_items(con: sqlite3.Connection) -> None:
+    if con.execute("SELECT 1 FROM seed_runs WHERE name = ?", (PRODUCTIVITY_SEED_NAME,)).fetchone():
+        return
+    created_at = now_iso()
+    productivity = DEFAULT_BOOTSTRAP["productivity"]
+    rows = []
+    for scope in ("monthly", "weekly", "default"):
+        for index, body in enumerate(productivity[f"{scope}s"] if scope == "default" else productivity[scope]):
+            completed = int((scope == "monthly" and index < 2) or (scope == "weekly" and index < 3))
+            rows.append((scope, body, completed, index, created_at, created_at))
+    con.executemany(
+        """
+        INSERT INTO productivity_items (scope, body, completed, sort_order, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    con.execute(
+        "INSERT INTO seed_runs (name, created_at) VALUES (?, ?)",
+        (PRODUCTIVITY_SEED_NAME, created_at),
     )
 
 
@@ -687,6 +767,236 @@ def delete_goal(goal_id: int) -> bool:
         return cursor.rowcount > 0
 
 
+def list_productivity_items(scope: str | None = None) -> list[dict]:
+    where = ""
+    values: tuple[str, ...] = ()
+    if scope:
+        where = "WHERE scope = ?"
+        values = (scope,)
+    with closing(connect()) as con:
+        rows = con.execute(
+            f"""
+            SELECT id, scope, body, completed, created_at, updated_at
+            FROM productivity_items
+            {where}
+            ORDER BY sort_order ASC, id ASC
+            """,
+            values,
+        ).fetchall()
+    return [row_to_productivity_item(row) for row in rows]
+
+
+def create_productivity_item(scope: str, body: str) -> dict:
+    timestamp = now_iso()
+    with closing(connect()) as con, con:
+        sort_order = con.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM productivity_items WHERE scope = ?",
+            (scope,),
+        ).fetchone()[0]
+        cursor = con.execute(
+            """
+            INSERT INTO productivity_items (scope, body, completed, sort_order, created_at, updated_at)
+            VALUES (?, ?, 0, ?, ?, ?)
+            """,
+            (scope, body, sort_order, timestamp, timestamp),
+        )
+        row = con.execute(
+            """
+            SELECT id, scope, body, completed, created_at, updated_at
+            FROM productivity_items
+            WHERE id = ?
+            """,
+            (cursor.lastrowid,),
+        ).fetchone()
+    return row_to_productivity_item(row)
+
+
+def toggle_productivity_item(item_id: int) -> dict | None:
+    timestamp = now_iso()
+    with closing(connect()) as con, con:
+        cursor = con.execute(
+            """
+            UPDATE productivity_items
+            SET completed = CASE completed WHEN 1 THEN 0 ELSE 1 END,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (timestamp, item_id),
+        )
+        if cursor.rowcount == 0:
+            return None
+        row = con.execute(
+            """
+            SELECT id, scope, body, completed, created_at, updated_at
+            FROM productivity_items
+            WHERE id = ?
+            """,
+            (item_id,),
+        ).fetchone()
+    return row_to_productivity_item(row)
+
+
+def delete_productivity_item(item_id: int) -> bool:
+    with closing(connect()) as con, con:
+        cursor = con.execute("DELETE FROM productivity_items WHERE id = ?", (item_id,))
+        return cursor.rowcount > 0
+
+
+def set_productivity_progress(date_key: str, item_id: int, completed: bool) -> dict | None:
+    timestamp = now_iso()
+    with closing(connect()) as con, con:
+        item = con.execute(
+            "SELECT id FROM productivity_items WHERE id = ? AND scope = 'default'",
+            (item_id,),
+        ).fetchone()
+        if item is None:
+            return None
+        con.execute(
+            """
+            INSERT INTO productivity_progress (date_key, item_id, completed, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(date_key, item_id) DO UPDATE SET
+                completed = excluded.completed,
+                updated_at = excluded.updated_at
+            """,
+            (date_key, item_id, int(completed), timestamp),
+        )
+    return {"date": date_key, "item_id": item_id, "completed": completed}
+
+
+def get_productivity_note(date_key: str) -> dict:
+    with closing(connect()) as con:
+        row = con.execute(
+            "SELECT date_key, title, items_json, updated_at FROM productivity_notes WHERE date_key = ?",
+            (date_key,),
+        ).fetchone()
+    if row is None:
+        return {"date": date_key, "title": "", "items": [], "updated_at": None}
+    try:
+        items = json.loads(row["items_json"])
+    except json.JSONDecodeError:
+        items = []
+    return {"date": row["date_key"], "title": row["title"], "items": items, "updated_at": row["updated_at"]}
+
+
+def update_productivity_note(date_key: str, title: str, items: list[dict]) -> dict:
+    timestamp = now_iso()
+    cleaned_items = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        body, error = validate_body(item.get("body"), "note item")
+        if error:
+            continue
+        cleaned_items.append({"body": body, "completed": bool(item.get("completed"))})
+    with closing(connect()) as con, con:
+        con.execute(
+            """
+            INSERT INTO productivity_notes (date_key, title, items_json, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(date_key) DO UPDATE SET
+                title = excluded.title,
+                items_json = excluded.items_json,
+                updated_at = excluded.updated_at
+            """,
+            (date_key, title, json.dumps(cleaned_items, separators=(",", ":")), timestamp),
+        )
+    return get_productivity_note(date_key)
+
+
+def clear_completed_note_items(date_key: str) -> dict:
+    note = get_productivity_note(date_key)
+    remaining = [item for item in note["items"] if not item.get("completed")]
+    return update_productivity_note(date_key, note["title"], remaining)
+
+
+def delete_productivity_note(date_key: str) -> bool:
+    with closing(connect()) as con, con:
+        cursor = con.execute("DELETE FROM productivity_notes WHERE date_key = ?", (date_key,))
+        return cursor.rowcount > 0
+
+
+def productivity_context(today: datetime | None = None) -> dict:
+    current = (today or datetime.now().astimezone()).date()
+    week_start = current - timedelta(days=current.weekday())
+    week_end = week_start + timedelta(days=6)
+    return {
+        "today": current.strftime("%Y-%m-%d"),
+        "monthName": current.strftime("%B"),
+        "weekNumber": current.isocalendar().week,
+        "weekRange": f"{week_start.strftime('%b %-d') if os.name != 'nt' else week_start.strftime('%b %#d')} - {week_end.strftime('%b %-d, %Y') if os.name != 'nt' else week_end.strftime('%b %#d, %Y')}",
+        "weekDates": [week_start + timedelta(days=offset) for offset in range(7)],
+    }
+
+
+def build_productivity_state(anchor_date: str | None = None) -> dict:
+    anchor = None
+    if anchor_date:
+        parsed_date, error = parse_date_key(anchor_date)
+        if error is None:
+            anchor = datetime.strptime(parsed_date, "%Y-%m-%d").replace(tzinfo=datetime.now().astimezone().tzinfo)
+    context = productivity_context(anchor)
+    items_by_scope = {scope: list_productivity_items(scope) for scope in PRODUCTIVITY_SCOPES}
+    defaults = items_by_scope["default"]
+    default_ids = [item["id"] for item in defaults]
+    week_date_keys = [day.strftime("%Y-%m-%d") for day in context["weekDates"]]
+    today_date = datetime.strptime(context["today"], "%Y-%m-%d").date()
+    current_month = today_date.replace(day=1)
+    month_date_keys = []
+    cursor = current_month
+    while cursor <= today_date:
+        month_date_keys.append(cursor.strftime("%Y-%m-%d"))
+        cursor += timedelta(days=1)
+    date_keys = sorted(set(week_date_keys + month_date_keys))
+    progress: dict[str, dict[int, bool]] = {date_key: {} for date_key in date_keys}
+    if default_ids:
+        placeholders = ",".join("?" for _ in default_ids)
+        with closing(connect()) as con:
+            rows = con.execute(
+                f"""
+                SELECT date_key, item_id, completed
+                FROM productivity_progress
+                WHERE date_key IN ({",".join("?" for _ in date_keys)})
+                  AND item_id IN ({placeholders})
+                """,
+                (*date_keys, *default_ids),
+            ).fetchall()
+        for row in rows:
+            progress[row["date_key"]][row["item_id"]] = bool(row["completed"])
+    week_days = []
+    for day in context["weekDates"]:
+        date_key = day.strftime("%Y-%m-%d")
+        note = get_productivity_note(date_key)
+        week_days.append(
+            {
+                "date": day.strftime("%b %#d" if os.name == "nt" else "%b %-d"),
+                "dateKey": date_key,
+                "day": day.strftime("%a"),
+                "done": [progress[date_key].get(item["id"], False) for item in defaults],
+                "notes": bool(note["title"] or note["items"]),
+            }
+        )
+    today_done = progress.get(context["today"], {})
+    today_count = sum(1 for item in defaults if today_done.get(item["id"], False))
+    month_values = []
+    for date_key in month_date_keys:
+        values = progress.get(date_key, {})
+        month_values.append(round((sum(1 for item in defaults if values.get(item["id"], False)) / len(defaults)) * 100) if defaults else 0)
+    return {
+        "monthly": items_by_scope["monthly"],
+        "weekly": items_by_scope["weekly"],
+        "defaults": defaults,
+        "today": context["today"],
+        "monthName": context["monthName"],
+        "weekNumber": context["weekNumber"],
+        "weekRange": context["weekRange"],
+        "weekDays": week_days,
+        "todayCompleted": today_count,
+        "monthProgress": month_values[-14:] or [0],
+        "selectedNote": get_productivity_note(context["today"]),
+    }
+
+
 def get_payload(key: str) -> dict:
     with closing(connect()) as con:
         row = con.execute(
@@ -702,7 +1012,7 @@ def get_payload(key: str) -> dict:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "AgentDashboard/0.1.7"
+    server_version = "AgentDashboard/0.1.8"
 
     def log_message(self, fmt: str, *args: object) -> None:
         message = "%s - %s\n" % (self.log_date_time_string(), fmt % args)
@@ -711,7 +1021,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             log.write(message)
 
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
+        parsed_url = urlparse(self.path)
+        path = parsed_url.path
         if path in {"/", "/index.html"}:
             self.send_file(INDEX_PATH, "text/html; charset=utf-8")
             return
@@ -734,6 +1045,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/goals":
             self.handle_database(lambda: self.send_json(list_goals()))
             return
+        if path == "/api/productivity":
+            query = parse_qs(parsed_url.query)
+            anchor_date = query.get("date", [None])[0]
+            self.handle_database(lambda: self.send_json(build_productivity_state(anchor_date)))
+            return
+        if len(path_parts := [part for part in path.split("/") if part]) == 4 and path_parts[:3] == ["api", "productivity", "notes"]:
+            date_key, error = parse_date_key(path_parts[3])
+            if error:
+                self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+                return
+            self.handle_database(lambda: self.send_json(get_productivity_note(date_key)))
+            return
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def do_POST(self) -> None:
@@ -743,6 +1066,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/goals":
             self.handle_database(self.handle_create_goal)
+            return
+        if path == "/api/productivity/items":
+            self.handle_database(self.handle_create_productivity_item)
+            return
+        if path == "/api/productivity/progress":
+            self.handle_database(self.handle_set_productivity_progress)
             return
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
@@ -754,6 +1083,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if len(path_parts) == 4 and path_parts[:2] == ["api", "goals"] and path_parts[3] == "toggle":
             self.handle_database(lambda: self.handle_toggle_goal(path_parts[2]))
             return
+        if len(path_parts) == 5 and path_parts[:3] == ["api", "productivity", "items"] and path_parts[4] == "toggle":
+            self.handle_database(lambda: self.handle_toggle_productivity_item(path_parts[3]))
+            return
+        if len(path_parts) == 4 and path_parts[:3] == ["api", "productivity", "notes"]:
+            date_key, error = parse_date_key(path_parts[3])
+            if error:
+                self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+                return
+            self.handle_database(lambda: self.handle_update_productivity_note(date_key))
+            return
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def do_DELETE(self) -> None:
@@ -763,6 +1102,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         if len(path_parts) == 3 and path_parts[:2] == ["api", "goals"]:
             self.handle_database(lambda: self.handle_delete_goal(path_parts[2]))
+            return
+        if len(path_parts) == 4 and path_parts[:3] == ["api", "productivity", "items"]:
+            self.handle_database(lambda: self.handle_delete_productivity_item(path_parts[3]))
+            return
+        if len(path_parts) == 4 and path_parts[:3] == ["api", "productivity", "notes"]:
+            date_key, error = parse_date_key(path_parts[3])
+            if error:
+                self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+                return
+            self.handle_database(lambda: self.handle_delete_productivity_note(date_key))
             return
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
@@ -881,6 +1230,102 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not delete_goal(goal_id):
             self.send_error_json(HTTPStatus.NOT_FOUND, "goal not found")
             return
+        self.send_json({"ok": True, "deleted": True})
+
+    def handle_create_productivity_item(self) -> None:
+        payload, error = self.read_json_body()
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        unsupported = set(payload) - {"scope", "body"}
+        if unsupported:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, f"unsupported field: {sorted(unsupported)[0]}")
+            return
+        scope, error = validate_scope(payload.get("scope"))
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        body, error = validate_body(payload.get("body"))
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        self.send_json(create_productivity_item(scope, body), HTTPStatus.CREATED)
+
+    def handle_toggle_productivity_item(self, raw_id: str) -> None:
+        item_id, error = parse_resource_id(raw_id)
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        item = toggle_productivity_item(item_id)
+        if item is None:
+            self.send_error_json(HTTPStatus.NOT_FOUND, "productivity item not found")
+            return
+        self.send_json(item)
+
+    def handle_delete_productivity_item(self, raw_id: str) -> None:
+        item_id, error = parse_resource_id(raw_id)
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        if not delete_productivity_item(item_id):
+            self.send_error_json(HTTPStatus.NOT_FOUND, "productivity item not found")
+            return
+        self.send_json({"ok": True, "deleted": True})
+
+    def handle_set_productivity_progress(self) -> None:
+        payload, error = self.read_json_body()
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        unsupported = set(payload) - {"date", "item_id", "completed"}
+        if unsupported:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, f"unsupported field: {sorted(unsupported)[0]}")
+            return
+        if not isinstance(payload.get("date"), str):
+            self.send_error_json(HTTPStatus.BAD_REQUEST, "date must use YYYY-MM-DD")
+            return
+        date_key, error = parse_date_key(payload["date"])
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        item_id_value = payload.get("item_id")
+        if isinstance(item_id_value, bool) or not isinstance(item_id_value, int) or item_id_value <= 0:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, "item_id must be a positive integer")
+            return
+        completed, error = validate_bool(payload.get("completed"), "completed")
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        progress = set_productivity_progress(date_key, item_id_value, completed)
+        if progress is None:
+            self.send_error_json(HTTPStatus.NOT_FOUND, "default task not found")
+            return
+        self.send_json(progress)
+
+    def handle_update_productivity_note(self, date_key: str) -> None:
+        payload, error = self.read_json_body()
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        unsupported = set(payload) - {"title", "items", "action"}
+        if unsupported:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, f"unsupported field: {sorted(unsupported)[0]}")
+            return
+        if payload.get("action") == "clear_completed":
+            self.send_json(clear_completed_note_items(date_key))
+            return
+        title = payload.get("title", "")
+        if not isinstance(title, str):
+            self.send_error_json(HTTPStatus.BAD_REQUEST, "title must be a string")
+            return
+        items = payload.get("items", [])
+        if not isinstance(items, list):
+            self.send_error_json(HTTPStatus.BAD_REQUEST, "items must be an array")
+            return
+        self.send_json(update_productivity_note(date_key, title.strip(), items))
+
+    def handle_delete_productivity_note(self, date_key: str) -> None:
+        delete_productivity_note(date_key)
         self.send_json({"ok": True, "deleted": True})
 
     def handle_database(self, callback) -> None:

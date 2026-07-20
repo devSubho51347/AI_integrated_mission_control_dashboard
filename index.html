@@ -419,7 +419,31 @@
       color: var(--purple);
       font-weight: 900;
       white-space: nowrap;
+      cursor: pointer;
     }
+    .check-row, .note-item {
+      display: grid;
+      grid-template-columns: 18px 1fr 28px;
+      gap: 8px;
+      align-items: center;
+      margin: 10px 0;
+      color: #d8d8df;
+    }
+    .check-row input, .note-item input[type="checkbox"] { accent-color: var(--orange); }
+    .check-row span.done, .note-item span.done { color: var(--muted); text-decoration: line-through; }
+    .delete-btn {
+      width: 28px;
+      height: 28px;
+      border: 1px solid #33333b;
+      border-radius: 7px;
+      color: var(--red);
+      cursor: pointer;
+    }
+    .inline-form { display: flex; gap: 8px; margin-top: 14px; }
+    .inline-form .search { min-width: 0; }
+    .note-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+    .note-editor { display: grid; gap: 12px; }
+    .note-item span { min-width: 0; overflow-wrap: anywhere; }
 
     .data-note {
       margin-top: 30px;
@@ -459,7 +483,7 @@
         <button class="icon-btn" title="Messages">[]</button>
         <button class="icon-btn" title="Refresh">R</button>
         <button class="icon-btn" title="Alerts">!</button>
-        <span class="pill">v0.1.6</span>
+        <span class="pill">v0.1.8</span>
         <span class="dot"></span>
         <span>System Online</span>
       </div>
@@ -594,6 +618,10 @@
         ]
       }
     };
+    let PRODUCTIVITY_DATA = null;
+    let selectedProductivityDate = null;
+    let selectedWeekDate = null;
+    const TODAY_KEY = new Date().toISOString().slice(0, 10);
 
     const pageIds = MOCK_DATA.pages.map(p => p.toLowerCase());
     const nav = document.getElementById("nav");
@@ -603,6 +631,7 @@
       if (!button) return;
       document.querySelectorAll(".nav button").forEach(b => b.classList.toggle("active", b === button));
       document.querySelectorAll(".page").forEach(p => p.classList.toggle("active", p.id === button.dataset.page));
+      if (button.dataset.page === "productivity") refreshProductivity();
     });
 
     const title = (icon, name, text, actions = "") => `
@@ -744,9 +773,110 @@
       document.getElementById("chat").innerHTML = `<div class="grid chat-layout"><aside class="chat-list">${section("M", "Messages", "Chat with your agents")}${MOCK_DATA.agents.slice(1).map((a,i) => `<div class="chat-agent ${i===0?"active":""}"><div class="avatar" style="--agent:${a.color};width:38px;height:38px">${a.icon}</div><div><strong>${a.name}</strong><p>${a.role}</p></div></div>`).join("")}</aside><section class="thread"><div class="agent-head" style="gap:12px;margin-bottom:20px"><div class="avatar" style="--agent:var(--purple);width:42px;height:42px">B</div><div><h2>Bill <span class="live">LIVE</span></h2><p>Discord Operations</p></div></div><div class="messages">${MOCK_DATA.messages.map(m => `<div class="message">${m[1]}<p style="font-size:11px;margin-top:8px">${m[2]}</p></div>`).join("")}</div><div class="composer"><input class="search" placeholder="Type a message..." /><button class="primary-btn">Send</button></div></section></div>`;
     }
 
+    const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
+
+    function embeddedProductivityData() {
+      const source = MOCK_DATA.productivity || {};
+      const normalize = (scope, items = [], completed = 0) => items.map((body, index) => ({
+        id: `${scope}-${index}`,
+        scope,
+        body,
+        completed: index < completed
+      }));
+      return {
+        monthly: normalize("monthly", source.monthly, 2),
+        weekly: normalize("weekly", source.weekly, 3),
+        defaults: normalize("default", source.defaults, 0),
+        today: new Date().toISOString().slice(0, 10),
+        monthName: new Date().toLocaleString(undefined, { month: "long" }),
+        weekNumber: getWeekNumber(new Date()),
+        weekRange: source.weekRange || "Current Week",
+        weekDays: source.weekDays || [],
+        todayCompleted: 0,
+        monthProgress: [60, 65, 78, 68, 74, 62, 70],
+        selectedNote: { title: "", items: [] }
+      };
+    }
+
+    function getWeekNumber(date) {
+      const copy = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+      copy.setUTCDate(copy.getUTCDate() + 4 - (copy.getUTCDay() || 7));
+      const yearStart = new Date(Date.UTC(copy.getUTCFullYear(), 0, 1));
+      return Math.ceil((((copy - yearStart) / 86400000) + 1) / 7);
+    }
+
+    function shiftDate(dateKey, days) {
+      const date = new Date(`${dateKey}T00:00:00`);
+      date.setDate(date.getDate() + days);
+      return date.toISOString().slice(0, 10);
+    }
+
+    async function productivityRequest(url, options = {}) {
+      const response = await fetch(url, {
+        cache: "no-store",
+        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+        ...options
+      });
+      if (!response.ok) throw new Error((await response.json()).error?.message || "Productivity request failed");
+      return response.json();
+    }
+
+    async function loadProductivityData() {
+      if (location.protocol === "file:") {
+        PRODUCTIVITY_DATA = embeddedProductivityData();
+        selectedProductivityDate = PRODUCTIVITY_DATA.today;
+        return;
+      }
+      try {
+        const query = selectedWeekDate ? `?date=${encodeURIComponent(selectedWeekDate)}` : "";
+        PRODUCTIVITY_DATA = await productivityRequest(`/api/productivity${query}`);
+        selectedWeekDate = selectedWeekDate || PRODUCTIVITY_DATA.today;
+        selectedProductivityDate = selectedProductivityDate || PRODUCTIVITY_DATA.today;
+        if (selectedProductivityDate !== PRODUCTIVITY_DATA.today) {
+          PRODUCTIVITY_DATA.selectedNote = await productivityRequest(`/api/productivity/notes/${selectedProductivityDate}`);
+        }
+      } catch (error) {
+        console.warn("Using embedded productivity preview data", error);
+        PRODUCTIVITY_DATA = embeddedProductivityData();
+        selectedProductivityDate = PRODUCTIVITY_DATA.today;
+      }
+    }
+
+    async function refreshProductivity() {
+      await loadProductivityData();
+      productivity();
+    }
+
+    function productivityCard(scope, heading, subtitle, accent, color) {
+      const items = PRODUCTIVITY_DATA?.[scope] || [];
+      const completed = items.filter(item => item.completed).length;
+      const percent = items.length ? Math.round((completed / items.length) * 100) : 0;
+      return `<div class="card ${accent}">
+        <div class="meta"><h3>${heading}</h3><span>${subtitle} - ${completed} / ${items.length} completed</span></div>
+        <div class="progress" style="margin:14px 0"><div class="bar" style="--w:${percent}%;background:${color}"></div></div>
+        ${items.map(item => `<label class="check-row"><input type="checkbox" data-productivity-toggle="${item.id}" ${item.completed ? "checked" : ""}/><span class="${item.completed ? "done" : ""}">${escapeHtml(item.body)}</span><button class="delete-btn" data-productivity-delete="${item.id}" title="Delete">x</button></label>`).join("") || `<p>No items yet</p>`}
+        <form class="inline-form" data-productivity-add="${scope}">
+          <input class="search" name="body" placeholder="Add ${heading.toLowerCase().replace(" goals", "").replace(" tasks", " task")}" />
+          <button class="primary-btn" type="submit">Add</button>
+        </form>
+      </div>`;
+    }
+
+    function noteEditor(note, dateLabel) {
+      const items = note?.items || [];
+      return `<div class="card note-editor">
+        <h3>Notes - ${escapeHtml(dateLabel)}</h3>
+        <input class="search" id="note-title" value="${escapeHtml(note?.title || "")}" placeholder="Add a title" />
+        <div id="note-items">${items.map((item, index) => `<label class="note-item"><input type="checkbox" data-note-toggle="${index}" ${item.completed ? "checked" : ""}/><span class="${item.completed ? "done" : ""}">${escapeHtml(item.body)}</span><button class="delete-btn" data-note-delete="${index}" title="Delete">x</button></label>`).join("")}</div>
+        <form class="inline-form" id="note-add-form">
+          <input class="search" name="body" placeholder="Add checklist item" />
+          <button class="primary-btn" type="submit">Add</button>
+        </form>
+      </div>`;
+    }
+
     function productivity() {
-      const checks = (items, completed = 2) => items.map((x,i) => `<p style="margin:10px 0"><input type="checkbox" ${i<completed?"checked":""}/> ${x}</p>`).join("");
-      const productivityData = MOCK_DATA.productivity || {};
+      const productivityData = PRODUCTIVITY_DATA || embeddedProductivityData();
       const defaultTasks = productivityData.defaults || [];
       const weekDays = productivityData.weekDays || [];
       const taskIcons = ["D", "R", "M", "B", "P", "N"];
@@ -755,26 +885,126 @@
         const percent = defaultTasks.length ? Math.round((completedCount(values) / defaultTasks.length) * 100) : 0;
         return `<div class="daily-progress"><strong>${percent}%</strong><div class="progress"><div class="bar" style="--w:${percent}%;background:var(--purple)"></div></div></div>`;
       };
+      const selectedDay = weekDays.find(day => day.dateKey === selectedProductivityDate) || weekDays.find(day => day.dateKey === productivityData.today) || weekDays[0] || {};
       const weekRows = weekDays.map(day => `<tr>
-        <td>${day.date}</td>
-        <td>${day.day}</td>
-        ${defaultTasks.map((_, i) => `<td><input class="task-check" type="checkbox" ${day.done?.[i] ? "checked" : ""} /></td>`).join("")}
+        <td>${escapeHtml(day.date)}</td>
+        <td>${escapeHtml(day.day)}</td>
+        ${defaultTasks.map((task, i) => `<td><input class="task-check" type="checkbox" data-progress-date="${day.dateKey || ""}" data-progress-task="${task.id}" ${day.done?.[i] ? "checked" : ""} /></td>`).join("")}
         <td>${progressCell(day.done || [])}</td>
-        <td><span class="note-link">${day.notes ? "Edit Note" : "Add Note"}</span></td>
+        <td><span class="note-link" data-note-date="${day.dateKey || ""}">${day.notes ? "Edit Note" : "Add Note"}</span></td>
       </tr>`).join("");
+      const monthSeries = productivityData.monthProgress?.length ? productivityData.monthProgress : [0];
       document.getElementById("productivity").innerHTML = title("P", "Weekly Planner", "Goals, habits, notes, and daily progress.") +
-        `<div class="grid cols-3"><div class="card accent-purple"><div class="meta"><h3>Monthly Goals</h3><span>2 / 5 completed</span></div><div class="progress"><div class="bar" style="--w:40%;background:var(--purple)"></div></div>${checks(productivityData.monthly || [], 2)}</div><div class="card accent-green"><div class="meta"><h3>Weekly Goals</h3><span>3 / 5 completed</span></div><div class="progress"><div class="bar" style="--w:60%;background:var(--green)"></div></div>${checks(productivityData.weekly || [], 3)}</div><div class="card accent-orange"><div class="meta"><h3>Default Daily Tasks</h3><span>4 / 6 today</span></div>${checks(defaultTasks, 4)}<button class="ghost-btn" style="margin-top:10px;color:var(--orange)">+ Add New Default Task</button></div></div>
-        ${section("C", "Daily Default Task Progress - This Month")}<div class="card chart-card">${lineChart([60,65,78,68,74,62,70], [58,64,76,66,72,61,69])}</div>
+        `<div class="grid cols-3">
+          ${productivityCard("monthly", "Monthly Goals", productivityData.monthName || "This Month", "accent-purple", "var(--purple)")}
+          ${productivityCard("weekly", "Weekly Goals", `Week ${productivityData.weekNumber || ""}`.trim(), "accent-green", "var(--green)")}
+          ${productivityCard("defaults", "Default Daily Tasks", `${productivityData.todayCompleted || 0} / ${defaultTasks.length} today`, "accent-orange", "var(--orange)")}
+        </div>
+        ${section("C", `Daily Default Task Progress - ${escapeHtml(productivityData.monthName || "This Month")}`)}<div class="card chart-card">${lineChart(monthSeries, monthSeries)}</div>
         <div class="planner-tools">
           ${section("W", "Default Entire Week", "Track every default daily task across the selected week.")}
-          <div class="week-switcher"><button class="icon-btn" title="Previous week">&lt;</button><span class="week-range">${productivityData.weekRange || "Current Week"}</span><button class="icon-btn" title="Next week">&gt;</button></div>
-          <button class="ghost-btn" style="color:var(--orange)">Today</button>
+          <div class="week-switcher"><button class="icon-btn" title="Previous week" data-week-shift="-7">&lt;</button><span class="week-range">Week ${productivityData.weekNumber || ""} - ${escapeHtml(productivityData.weekRange || "Current Week")}</span><button class="icon-btn" title="Next week" data-week-shift="7">&gt;</button></div>
+          <button class="ghost-btn" id="today-note-btn" style="color:var(--orange)">Today</button>
         </div>
         <div class="card week-table-wrap"><table class="week-table">
-          <thead><tr><th>Date</th><th>Day</th>${defaultTasks.map((task, i) => `<th><span class="task-icon">${taskIcons[i] || "T"}</span>${task}</th>`).join("")}<th>Daily Progress</th><th>Notes</th></tr></thead>
+          <thead><tr><th>Date</th><th>Day</th>${defaultTasks.map((task, i) => `<th><span class="task-icon">${taskIcons[i] || "T"}</span>${escapeHtml(task.body)}</th>`).join("")}<th>Daily Progress</th><th>Notes</th></tr></thead>
           <tbody>${weekRows}</tbody>
         </table></div>
-        ${section("N", "Notes")}<div class="grid cols-2"><div class="card"><h3>Notes - May 13 (Mon)</h3><input class="search" placeholder="Add a title" style="margin:14px 0"/><p><input type="checkbox"> Buy groceries</p><p><input type="checkbox"> Call mom</p><p><input type="checkbox" checked> Work on project report</p><p><input type="checkbox"> Practice guitar</p></div><div class="card"><h3>Quick Actions</h3><p>Clear Completed</p><p>Export Notes</p><p>Print Notes</p><p style="color:var(--red)">Delete Notes</p></div></div>`;
+        ${section("N", "Notes")}<div class="grid cols-2">${noteEditor(productivityData.selectedNote || {}, `${selectedDay.date || ""} (${selectedDay.day || ""})`)}<div class="card"><h3>Quick Actions</h3><div class="note-actions"><button class="ghost-btn" id="clear-completed-notes">Clear Completed</button><button class="ghost-btn" id="export-notes">Export Notes</button><button class="ghost-btn" id="print-notes">Print Notes</button><button class="ghost-btn" id="delete-notes" style="color:var(--red)">Delete Notes</button></div></div></div>`;
+      bindProductivityEvents();
+    }
+
+    function currentNotePayload() {
+      const title = document.getElementById("note-title")?.value || "";
+      const note = PRODUCTIVITY_DATA?.selectedNote || { items: [] };
+      return { title, items: note.items || [] };
+    }
+
+    async function saveCurrentNote(payload) {
+      if (location.protocol === "file:") return;
+      PRODUCTIVITY_DATA.selectedNote = await productivityRequest(`/api/productivity/notes/${selectedProductivityDate}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload)
+      });
+      await refreshProductivity();
+    }
+
+    function bindProductivityEvents() {
+      document.querySelectorAll("[data-productivity-add]").forEach(form => form.addEventListener("submit", async event => {
+        event.preventDefault();
+        const body = new FormData(form).get("body")?.trim();
+        if (!body || location.protocol === "file:") return;
+        await productivityRequest("/api/productivity/items", { method: "POST", body: JSON.stringify({ scope: form.dataset.productivityAdd === "defaults" ? "default" : form.dataset.productivityAdd, body }) });
+        await refreshProductivity();
+      }));
+      document.querySelectorAll("[data-productivity-toggle]").forEach(input => input.addEventListener("change", async event => {
+        if (location.protocol === "file:") return;
+        await productivityRequest(`/api/productivity/items/${event.target.dataset.productivityToggle}/toggle`, { method: "PATCH", body: JSON.stringify({}) });
+        await refreshProductivity();
+      }));
+      document.querySelectorAll("[data-productivity-delete]").forEach(button => button.addEventListener("click", async event => {
+        event.preventDefault();
+        if (location.protocol === "file:") return;
+        await productivityRequest(`/api/productivity/items/${event.target.dataset.productivityDelete}`, { method: "DELETE" });
+        await refreshProductivity();
+      }));
+      document.querySelectorAll("[data-progress-task]").forEach(input => input.addEventListener("change", async event => {
+        if (location.protocol === "file:") return;
+        await productivityRequest("/api/productivity/progress", { method: "POST", body: JSON.stringify({ date: event.target.dataset.progressDate, item_id: Number(event.target.dataset.progressTask), completed: event.target.checked }) });
+        await refreshProductivity();
+      }));
+      document.querySelectorAll("[data-note-date]").forEach(link => link.addEventListener("click", async event => {
+        selectedProductivityDate = event.target.dataset.noteDate;
+        if (location.protocol !== "file:") PRODUCTIVITY_DATA.selectedNote = await productivityRequest(`/api/productivity/notes/${selectedProductivityDate}`);
+        productivity();
+      }));
+      document.querySelectorAll("[data-week-shift]").forEach(button => button.addEventListener("click", async event => {
+        selectedWeekDate = shiftDate(selectedWeekDate || PRODUCTIVITY_DATA.today, Number(event.currentTarget.dataset.weekShift));
+        selectedProductivityDate = selectedWeekDate;
+        await refreshProductivity();
+      }));
+      document.getElementById("today-note-btn")?.addEventListener("click", async () => {
+        selectedWeekDate = TODAY_KEY;
+        selectedProductivityDate = TODAY_KEY;
+        if (location.protocol !== "file:") PRODUCTIVITY_DATA.selectedNote = await productivityRequest(`/api/productivity/notes/${selectedProductivityDate}`);
+        await refreshProductivity();
+      });
+      document.getElementById("note-title")?.addEventListener("change", async () => saveCurrentNote(currentNotePayload()));
+      document.getElementById("note-add-form")?.addEventListener("submit", async event => {
+        event.preventDefault();
+        const body = new FormData(event.target).get("body")?.trim();
+        if (!body) return;
+        const payload = currentNotePayload();
+        payload.items.push({ body, completed: false });
+        await saveCurrentNote(payload);
+      });
+      document.querySelectorAll("[data-note-toggle]").forEach(input => input.addEventListener("change", async event => {
+        const payload = currentNotePayload();
+        payload.items[Number(event.target.dataset.noteToggle)].completed = event.target.checked;
+        await saveCurrentNote(payload);
+      }));
+      document.querySelectorAll("[data-note-delete]").forEach(button => button.addEventListener("click", async event => {
+        event.preventDefault();
+        const payload = currentNotePayload();
+        payload.items.splice(Number(event.target.dataset.noteDelete), 1);
+        await saveCurrentNote(payload);
+      }));
+      document.getElementById("clear-completed-notes")?.addEventListener("click", async () => {
+        if (location.protocol === "file:") return;
+        PRODUCTIVITY_DATA.selectedNote = await productivityRequest(`/api/productivity/notes/${selectedProductivityDate}`, { method: "PATCH", body: JSON.stringify({ action: "clear_completed" }) });
+        await refreshProductivity();
+      });
+      document.getElementById("delete-notes")?.addEventListener("click", async () => {
+        if (location.protocol === "file:") return;
+        await productivityRequest(`/api/productivity/notes/${selectedProductivityDate}`, { method: "DELETE" });
+        await refreshProductivity();
+      });
+      document.getElementById("export-notes")?.addEventListener("click", () => {
+        const note = currentNotePayload();
+        const text = [note.title, ...note.items.map(item => `${item.completed ? "[x]" : "[ ]"} ${item.body}`)].filter(Boolean).join("\n");
+        navigator.clipboard?.writeText(text);
+      });
+      document.getElementById("print-notes")?.addEventListener("click", () => window.print());
     }
 
     function monitor() {
@@ -796,6 +1026,7 @@
 
     async function initializeDashboard() {
       await loadDashboardData();
+      await loadProductivityData();
       dashboard();
       agents();
       tasks();
