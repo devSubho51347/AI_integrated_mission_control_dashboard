@@ -485,7 +485,7 @@
         <button class="icon-btn" title="Messages">[]</button>
         <button class="icon-btn" title="Refresh">R</button>
         <button class="icon-btn" title="Alerts">!</button>
-        <span class="pill">v0.2.1</span>
+        <span class="pill">v0.2.3</span>
         <span class="dot"></span>
         <span>System Online</span>
       </div>
@@ -511,7 +511,6 @@
       - MOCK_DATA.agents: real OpenClaw agent registry, model assignment, status, last activity.
       - MOCK_DATA.metrics: dashboard counters, uptime, task totals.
       - MOCK_DATA.activity: recent agent event stream and historical chart points.
-      - MOCK_DATA.documents: generated files/content index and rendered previews.
       - MOCK_DATA.messages: per-agent chat/session history.
       - MOCK_DATA.monitor: gateway, Discord, database, VPS, token/cost, cron status.
       - MOCK_DATA.productivity: planner goals, default tasks, daily checklist, notes.
@@ -560,14 +559,6 @@
           ["Dev", "Verify local logging system explicit model", "Completed", "4 days ago"]
         ]
       },
-      documents: [
-        ["Mission Control: Building a Live AI Agent Dashboard", "SCRIBE", "4.7 KB - May 6, 10:55 AM"],
-        ["Mobile Responsiveness Report", "DEV", "4.1 KB - May 6, 10:43 AM"],
-        ["Morning Competitor Brief - May 6, 2026", "SCOUT", "5.0 KB - May 6, 10:43 AM"],
-        ["Community Update - May 2026", "SCRIBE", "3.9 KB - May 6, 10:39 AM"],
-        ["Weekly Growth Report - Week of Apr 29", "REACH", "3.5 KB - May 6, 10:13 AM"],
-        ["Daily Support Plan - May 6", "SCRIBE", "2.7 KB - May 6, 8:15 AM"]
-      ],
       messages: [
         ["Bill", "Bill -> docs/bill/2026-05-01_test-doc.md - short role-aligned test document for Discord operations storage.", "09:14"],
         ["Bill", "Hello Larry - Bill here. Chat feature looks live on my side.", "08:50"],
@@ -602,6 +593,8 @@
     const TODAY_KEY = new Date().toISOString().slice(0, 10);
     let TASKS_DATA = null;
     let selectedTaskCategory = "";
+    let CONTENT_DATA = { documents: [], selected: null };
+    let selectedDocumentKey = null;
 
     const pageIds = MOCK_DATA.pages.map(p => p.toLowerCase());
     const nav = document.getElementById("nav");
@@ -612,6 +605,7 @@
       document.querySelectorAll(".nav button").forEach(b => b.classList.toggle("active", b === button));
       document.querySelectorAll(".page").forEach(p => p.classList.toggle("active", p.id === button.dataset.page));
       if (button.dataset.page === "tasks") refreshTasks();
+      if (button.dataset.page === "content") refreshContent();
       if (button.dataset.page === "productivity") refreshProductivity();
     });
 
@@ -883,10 +877,128 @@
       });
     }
 
+    async function contentRequest(url) {
+      const response = await fetch(url, { cache: "no-store" });
+      if (!response.ok) throw new Error((await response.json()).error?.message || "Content request failed");
+      return response.json();
+    }
+
+    const documentKey = document => `${document.agent}/${document.filename}`;
+    const formatBytes = bytes => `${(bytes / 1024).toFixed(bytes >= 1024 ? 1 : 2)} KB`;
+    const formatDate = value => value ? new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
+
+    async function loadContentData() {
+      if (location.protocol === "file:") {
+        CONTENT_DATA = { documents: [], selected: null };
+        return;
+      }
+      try {
+        const documents = await contentRequest("/api/documents");
+        const selectedStillExists = documents.some(document => documentKey(document) === selectedDocumentKey);
+        if (!selectedDocumentKey || !selectedStillExists) selectedDocumentKey = documents[0] ? documentKey(documents[0]) : null;
+        let selected = null;
+        if (selectedDocumentKey) {
+          const document = documents.find(item => documentKey(item) === selectedDocumentKey);
+          selected = await contentRequest(`/api/documents/${encodeURIComponent(document.agent)}/${encodeURIComponent(document.filename)}`);
+        }
+        CONTENT_DATA = { documents, selected };
+      } catch (error) {
+        console.error("Unable to load content documents", error);
+        CONTENT_DATA = { documents: [], selected: null };
+      }
+    }
+
+    async function refreshContent() {
+      await loadContentData();
+      content();
+    }
+
+    function inlineMarkdown(text) {
+      return escapeHtml(text)
+        .replace(/`([^`]+)`/g, "<code>$1</code>")
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+    }
+
+    function markdownToHtml(markdown = "") {
+      const lines = markdown.split(/\r?\n/);
+      let html = "";
+      let inCode = false;
+      let codeLines = [];
+      let listItems = [];
+      const flushList = () => {
+        if (listItems.length) {
+          html += `<ul>${listItems.map(item => `<li>${inlineMarkdown(item)}</li>`).join("")}</ul>`;
+          listItems = [];
+        }
+      };
+      const flushCode = () => {
+        if (inCode) {
+          html += `<pre><code>${escapeHtml(codeLines.join("\n"))}</code></pre>`;
+          codeLines = [];
+          inCode = false;
+        }
+      };
+      for (const line of lines) {
+        if (line.trim().startsWith("```")) {
+          if (inCode) flushCode();
+          else {
+            flushList();
+            inCode = true;
+            codeLines = [];
+          }
+          continue;
+        }
+        if (inCode) {
+          codeLines.push(line);
+          continue;
+        }
+        if (!line.trim()) {
+          flushList();
+          continue;
+        }
+        const heading = line.match(/^(#{1,3})\s+(.+)$/);
+        if (heading) {
+          flushList();
+          const level = Math.min(heading[1].length + 1, 4);
+          html += `<h${level}>${inlineMarkdown(heading[2])}</h${level}>`;
+          continue;
+        }
+        const list = line.match(/^\s*[-*]\s+(.+)$/);
+        if (list) {
+          listItems.push(list[1]);
+          continue;
+        }
+        flushList();
+        html += `<p>${inlineMarkdown(line)}</p>`;
+      }
+      flushList();
+      flushCode();
+      return html || "<p>No document selected.</p>";
+    }
+
     function content() {
-      document.getElementById("content").innerHTML = title("D", "Content", "Documents generated by your agents.", `<button class="ghost-btn">All Agents</button><button class="primary-btn">+ New Document</button>`) +
-        `<div class="grid cols-3">${metricCard(["Total Docs", "12", "", "pink"])}${metricCard(["Agents Writing", "4", "", "purple"])}${metricCard(["Latest", "Mission Control: Building a Live AI Agent Dashboard", "", "orange"])}</div>
-        <div class="grid content-layout">${section("F", "Documents", "Click to preview")}<div></div><aside class="card doc-list">${MOCK_DATA.documents.map((d,i) => `<div class="doc ${i===0?"active":""}"><div class="mini-icon">P</div><div><strong>${d[0]}</strong><p>${d[1]}</p><p>${d[2]}</p></div></div>`).join("")}</aside><article class="card preview"><div class="article"><p class="metric-label">SCRIBE / 2026-05-06_MISSION-CONTROL-DASHBOARD.MD</p><h2>Mission Control: Building a Live AI Agent Dashboard</h2><p><em>By Scribe - May 6, 2026</em></p><p>We're building something I haven't seen anyone else ship yet: a real-time operations dashboard for a fleet of autonomous AI agents.</p><h3>What It Does</h3><ul><li>Agent cards show each agent's status, task count, completion rate, and last activity.</li><li>The Office is an animated workspace where agents move to their desks and working hub.</li><li>Tasks Kanban is synced to the live API for create, update, and movement.</li><li>Content tab lists generated documents and rendered previews.</li><li>Chat tab sends direct messages to any agent channel.</li></ul><h3>What's Coming</h3><p>Agent-to-agent delegation UI, alert system for failed tasks, YouTube analytics, and cost monitoring.</p></div></article></div>`;
+      const documents = CONTENT_DATA.documents || [];
+      const selected = CONTENT_DATA.selected;
+      const agentsWriting = new Set(documents.map(document => document.agent)).size;
+      const latest = [...documents].sort((a, b) => String(b.modified_at).localeCompare(String(a.modified_at)))[0];
+      const docList = documents.map(document => {
+        const active = documentKey(document) === selectedDocumentKey;
+        return `<div class="doc ${active ? "active" : ""}" data-document-key="${escapeHtml(documentKey(document))}"><div class="mini-icon">${escapeHtml(document.agent.slice(0, 1).toUpperCase())}</div><div><strong>${escapeHtml(document.title)}</strong><p>${escapeHtml(document.agent.toUpperCase())}</p><p>${formatBytes(document.size)} - ${formatDate(document.modified_at)}</p></div></div>`;
+      }).join("") || `<p>No documents found</p>`;
+      const preview = selected ? `<div class="article"><p class="metric-label">${escapeHtml(selected.agent.toUpperCase())} / ${escapeHtml(selected.filename)}</p>${markdownToHtml(selected.content)}</div>` : `<div class="article"><p>No document selected.</p></div>`;
+      document.getElementById("content").innerHTML = title("D", "Content", "Documents generated by your agents.", `<button class="ghost-btn" id="refresh-documents">All Agents</button><button class="primary-btn">+ New Document</button>`) +
+        `<div class="grid cols-3">${metricCard(["Total Docs", String(documents.length), "", "pink"])}${metricCard(["Agents Writing", String(agentsWriting), "", "purple"])}${metricCard(["Latest", latest ? latest.title : "No documents", "", "orange"])}</div>
+        <div class="grid content-layout">${section("F", "Documents", "Click to preview")}<div></div><aside class="card doc-list">${docList}</aside><article class="card preview">${preview}</article></div>`;
+      bindContentEvents();
+    }
+
+    function bindContentEvents() {
+      document.getElementById("refresh-documents")?.addEventListener("click", refreshContent);
+      document.querySelectorAll("[data-document-key]").forEach(row => row.addEventListener("click", async event => {
+        selectedDocumentKey = event.currentTarget.dataset.documentKey;
+        await refreshContent();
+      }));
     }
 
     function chat() {
@@ -1157,6 +1269,7 @@
 
     async function initializeDashboard() {
       await loadDashboardData();
+      await loadContentData();
       await loadTasksData();
       await loadProductivityData();
       dashboard();
