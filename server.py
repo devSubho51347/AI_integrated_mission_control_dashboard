@@ -41,6 +41,7 @@ NOTE_COLOR_MIN = 0
 NOTE_COLOR_MAX = 5
 NOTE_SEED_NAME = "sticky_notes_v1"
 PRODUCTIVITY_SEED_NAME = "productivity_items_v1"
+TASK_SEED_NAME = "dashboard_tasks_v1"
 NOTE_SEEDS = [
     ("Prepare the weekly project update before Friday standup.", 0),
     ("Review dashboard walkthrough notes and tighten the demo script.", 1),
@@ -48,6 +49,75 @@ NOTE_SEEDS = [
     ("Block one focused hour for inbox cleanup and task triage.", 3),
 ]
 PRODUCTIVITY_SCOPES = {"monthly", "weekly", "default"}
+TASK_CATEGORIES = {"Work", "Marketing", "Development", "Personal"}
+TASK_PRIORITIES = {"Urgent", "Normal", "Someday"}
+TASK_STATUSES = {"todo", "in_progress", "done"}
+TASK_SEEDS = [
+    {
+        "title": "Audit OpenClaw gateway reconnect logs",
+        "category": "Development",
+        "priority": "Urgent",
+        "status": "todo",
+        "due_date": "2026-07-22",
+        "notes": "Check recent disconnect patterns and capture any recurring error messages.",
+    },
+    {
+        "title": "Outline weekly creator update",
+        "category": "Marketing",
+        "priority": "Normal",
+        "status": "todo",
+        "due_date": "2026-07-24",
+        "notes": "Draft the key wins, shipped dashboard changes, and next experiments.",
+    },
+    {
+        "title": "Plan focused workspace cleanup",
+        "category": "Personal",
+        "priority": "Someday",
+        "status": "todo",
+        "due_date": None,
+        "notes": "Group loose notes and remove stale scratch files when there is a quiet block.",
+    },
+    {
+        "title": "Record dashboard walkthrough clips",
+        "category": "Marketing",
+        "priority": "Urgent",
+        "status": "in_progress",
+        "due_date": "2026-07-21",
+        "notes": "Capture Tasks, Productivity, and agent activity sections separately.",
+    },
+    {
+        "title": "Wire live task filters into the Kanban board",
+        "category": "Development",
+        "priority": "Normal",
+        "status": "in_progress",
+        "due_date": "2026-07-23",
+        "notes": "Keep the existing layout and use category filtering from the API.",
+    },
+    {
+        "title": "Review sponsor outreach shortlist",
+        "category": "Work",
+        "priority": "Normal",
+        "status": "in_progress",
+        "due_date": "2026-07-26",
+        "notes": "Prioritize the best fit contacts before writing personalized intros.",
+    },
+    {
+        "title": "Ship persistent productivity goals API",
+        "category": "Development",
+        "priority": "Urgent",
+        "status": "done",
+        "due_date": "2026-07-20",
+        "notes": "Backend, UI wiring, tests, and GitHub backup are complete.",
+    },
+    {
+        "title": "Triage old inbox action items",
+        "category": "Personal",
+        "priority": "Normal",
+        "status": "done",
+        "due_date": "2026-07-19",
+        "notes": "Cleared stale items and left only follow-ups that still matter.",
+    },
+]
 
 
 DEFAULT_BOOTSTRAP = {
@@ -241,6 +311,21 @@ def row_to_productivity_item(row: sqlite3.Row) -> dict:
     }
 
 
+def row_to_task(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "category": row["category"],
+        "priority": row["priority"],
+        "status": row["status"],
+        "completed": bool(row["completed"]),
+        "due_date": row["due_date"],
+        "notes": row["notes"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
 def validate_body(value: object, field_name: str = "body") -> tuple[str | None, str | None]:
     if not isinstance(value, str):
         return None, f"{field_name} must be a string"
@@ -286,6 +371,31 @@ def validate_bool(value: object, field_name: str) -> tuple[bool | None, str | No
     if not isinstance(value, bool):
         return None, f"{field_name} must be true or false"
     return value, None
+
+
+def validate_choice(value: object, allowed: set[str], field_name: str) -> tuple[str | None, str | None]:
+    if not isinstance(value, str) or value not in allowed:
+        return None, f"{field_name} must be one of: {', '.join(sorted(allowed))}"
+    return value, None
+
+
+def validate_optional_string(value: object, field_name: str) -> tuple[str | None, str | None]:
+    if value is None:
+        return None, None
+    if not isinstance(value, str):
+        return None, f"{field_name} must be a string"
+    return value.strip(), None
+
+
+def validate_due_date(value: object) -> tuple[str | None, str | None]:
+    if value in (None, ""):
+        return None, None
+    if not isinstance(value, str):
+        return None, "due_date must use YYYY-MM-DD or null"
+    parsed, error = parse_date_key(value)
+    if error:
+        return None, "due_date must use YYYY-MM-DD or null"
+    return parsed, None
 
 
 def parse_timestamp(value: str | None) -> datetime | None:
@@ -571,6 +681,18 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                category TEXT NOT NULL CHECK (category IN ('Work', 'Marketing', 'Development', 'Personal')),
+                priority TEXT NOT NULL CHECK (priority IN ('Urgent', 'Normal', 'Someday')),
+                status TEXT NOT NULL CHECK (status IN ('todo', 'in_progress', 'done')),
+                completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)),
+                due_date TEXT,
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS productivity_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 scope TEXT NOT NULL CHECK (scope IN ('monthly', 'weekly', 'default')),
@@ -607,6 +729,7 @@ def init_db() -> None:
                 ("server", "seed", "Initialized dashboard bootstrap payload", now_iso()),
             )
         seed_notes(con)
+        seed_tasks(con)
         seed_productivity_items(con)
 
 
@@ -648,6 +771,140 @@ def seed_productivity_items(con: sqlite3.Connection) -> None:
         "INSERT INTO seed_runs (name, created_at) VALUES (?, ?)",
         (PRODUCTIVITY_SEED_NAME, created_at),
     )
+
+
+def seed_tasks(con: sqlite3.Connection) -> None:
+    if con.execute("SELECT 1 FROM seed_runs WHERE name = ?", (TASK_SEED_NAME,)).fetchone():
+        return
+    created_at = now_iso()
+    con.executemany(
+        """
+        INSERT INTO tasks (title, category, priority, status, completed, due_date, notes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                task["title"],
+                task["category"],
+                task["priority"],
+                task["status"],
+                int(task["status"] == "done"),
+                task["due_date"],
+                task["notes"],
+                created_at,
+                created_at,
+            )
+            for task in TASK_SEEDS
+        ],
+    )
+    con.execute(
+        "INSERT INTO seed_runs (name, created_at) VALUES (?, ?)",
+        (TASK_SEED_NAME, created_at),
+    )
+
+
+def list_tasks(category: str | None = None) -> list[dict]:
+    where = ""
+    values: tuple[str, ...] = ()
+    if category:
+        where = "WHERE category = ?"
+        values = (category,)
+    with closing(connect()) as con:
+        rows = con.execute(
+            f"""
+            SELECT id, title, category, priority, status, completed, due_date, notes, created_at, updated_at
+            FROM tasks
+            {where}
+            ORDER BY
+                CASE status WHEN 'todo' THEN 0 WHEN 'in_progress' THEN 1 ELSE 2 END,
+                CASE priority WHEN 'Urgent' THEN 0 WHEN 'Normal' THEN 1 ELSE 2 END,
+                COALESCE(due_date, '9999-12-31') ASC,
+                id ASC
+            """,
+            values,
+        ).fetchall()
+    return [row_to_task(row) for row in rows]
+
+
+def create_task(fields: dict) -> dict:
+    timestamp = now_iso()
+    status = fields.get("status", "todo")
+    completed = int(status == "done")
+    with closing(connect()) as con, con:
+        cursor = con.execute(
+            """
+            INSERT INTO tasks (title, category, priority, status, completed, due_date, notes, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                fields["title"],
+                fields.get("category", "Work"),
+                fields.get("priority", "Normal"),
+                status,
+                completed,
+                fields.get("due_date"),
+                fields.get("notes", ""),
+                timestamp,
+                timestamp,
+            ),
+        )
+        row = con.execute(
+            """
+            SELECT id, title, category, priority, status, completed, due_date, notes, created_at, updated_at
+            FROM tasks
+            WHERE id = ?
+            """,
+            (cursor.lastrowid,),
+        ).fetchone()
+    return row_to_task(row)
+
+
+def update_task(task_id: int, updates: dict) -> dict | None:
+    assignments = []
+    values = []
+    for field in ("title", "category", "priority", "status", "completed", "due_date", "notes"):
+        if field in updates:
+            assignments.append(f"{field} = ?")
+            values.append(int(updates[field]) if field == "completed" else updates[field])
+    if "status" in updates:
+        if "completed" not in updates:
+            assignments.append("completed = ?")
+            values.append(int(updates["status"] == "done"))
+        else:
+            completed_index = assignments.index("completed = ?")
+            values[completed_index] = int(updates["status"] == "done")
+    timestamp = now_iso()
+    assignments.append("updated_at = ?")
+    values.append(timestamp)
+    values.append(task_id)
+    with closing(connect()) as con, con:
+        cursor = con.execute(
+            f"UPDATE tasks SET {', '.join(assignments)} WHERE id = ?",
+            values,
+        )
+        if cursor.rowcount == 0:
+            return None
+        row = con.execute(
+            """
+            SELECT id, title, category, priority, status, completed, due_date, notes, created_at, updated_at
+            FROM tasks
+            WHERE id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+    return row_to_task(row)
+
+
+def delete_task(task_id: int) -> bool:
+    with closing(connect()) as con, con:
+        cursor = con.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        return cursor.rowcount > 0
+
+
+def clear_done_tasks() -> int:
+    with closing(connect()) as con, con:
+        cursor = con.execute("DELETE FROM tasks WHERE status = 'done' OR completed = 1")
+        return cursor.rowcount
 
 
 def list_notes() -> list[dict]:
@@ -1029,7 +1286,7 @@ def get_payload(key: str) -> dict:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "AgentDashboard/0.1.9"
+    server_version = "AgentDashboard/0.2.0"
 
     def log_message(self, fmt: str, *args: object) -> None:
         message = "%s - %s\n" % (self.log_date_time_string(), fmt % args)
@@ -1056,6 +1313,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/bootstrap":
             self.send_json(get_payload("bootstrap"))
             return
+        if path == "/api/tasks":
+            query = parse_qs(parsed_url.query)
+            category = query.get("category", [None])[0]
+            if category:
+                category, error = validate_choice(category, TASK_CATEGORIES, "category")
+                if error:
+                    self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+                    return
+            self.handle_database(lambda: self.send_json(list_tasks(category)))
+            return
         if path == "/api/notes":
             self.handle_database(lambda: self.send_json(list_notes()))
             return
@@ -1081,6 +1348,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if path == "/api/notes":
             self.handle_database(self.handle_create_note)
             return
+        if path == "/api/tasks":
+            self.handle_database(self.handle_create_task)
+            return
         if path == "/api/goals":
             self.handle_database(self.handle_create_goal)
             return
@@ -1096,6 +1366,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         path_parts = [part for part in urlparse(self.path).path.split("/") if part]
         if len(path_parts) == 3 and path_parts[:2] == ["api", "notes"]:
             self.handle_database(lambda: self.handle_update_note(path_parts[2]))
+            return
+        if len(path_parts) == 3 and path_parts[:2] == ["api", "tasks"]:
+            self.handle_database(lambda: self.handle_update_task(path_parts[2]))
             return
         if len(path_parts) == 4 and path_parts[:2] == ["api", "goals"] and path_parts[3] == "toggle":
             self.handle_database(lambda: self.handle_toggle_goal(path_parts[2]))
@@ -1116,6 +1389,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         path_parts = [part for part in urlparse(self.path).path.split("/") if part]
         if len(path_parts) == 3 and path_parts[:2] == ["api", "notes"]:
             self.handle_database(lambda: self.handle_delete_note(path_parts[2]))
+            return
+        if len(path_parts) == 3 and path_parts == ["api", "tasks", "done"]:
+            self.handle_database(self.handle_clear_done_tasks)
+            return
+        if len(path_parts) == 3 and path_parts[:2] == ["api", "tasks"]:
+            self.handle_database(lambda: self.handle_delete_task(path_parts[2]))
             return
         if len(path_parts) == 3 and path_parts[:2] == ["api", "goals"]:
             self.handle_database(lambda: self.handle_delete_goal(path_parts[2]))
@@ -1212,6 +1491,107 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_error_json(HTTPStatus.NOT_FOUND, "note not found")
             return
         self.send_json({"ok": True, "deleted": True})
+
+    def validated_task_fields(self, payload: dict, creating: bool) -> tuple[dict | None, str | None]:
+        supported = {"title", "category", "priority", "status", "completed", "due_date", "notes"}
+        unsupported = set(payload) - supported
+        if unsupported:
+            return None, f"unsupported field: {sorted(unsupported)[0]}"
+        if creating and "title" not in payload:
+            return None, "title is required"
+        if not creating and not any(field in payload for field in supported):
+            return None, "at least one task field is required"
+        fields = {}
+        if "title" in payload:
+            title, error = validate_body(payload["title"], "title")
+            if error:
+                return None, error
+            fields["title"] = title
+        if "category" in payload:
+            category, error = validate_choice(payload["category"], TASK_CATEGORIES, "category")
+            if error:
+                return None, error
+            fields["category"] = category
+        elif creating:
+            fields["category"] = "Work"
+        if "priority" in payload:
+            priority, error = validate_choice(payload["priority"], TASK_PRIORITIES, "priority")
+            if error:
+                return None, error
+            fields["priority"] = priority
+        elif creating:
+            fields["priority"] = "Normal"
+        if "status" in payload:
+            status, error = validate_choice(payload["status"], TASK_STATUSES, "status")
+            if error:
+                return None, error
+            fields["status"] = status
+        elif creating:
+            fields["status"] = "todo"
+        if "completed" in payload:
+            completed, error = validate_bool(payload["completed"], "completed")
+            if error:
+                return None, error
+            fields["completed"] = completed
+        if "due_date" in payload:
+            due_date, error = validate_due_date(payload["due_date"])
+            if error:
+                return None, error
+            fields["due_date"] = due_date
+        elif creating:
+            fields["due_date"] = None
+        if "notes" in payload:
+            notes, error = validate_optional_string(payload["notes"], "notes")
+            if error:
+                return None, error
+            fields["notes"] = notes or ""
+        elif creating:
+            fields["notes"] = ""
+        return fields, None
+
+    def handle_create_task(self) -> None:
+        payload, error = self.read_json_body()
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        fields, error = self.validated_task_fields(payload, creating=True)
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        self.send_json(create_task(fields), HTTPStatus.CREATED)
+
+    def handle_update_task(self, raw_id: str) -> None:
+        task_id, error = parse_resource_id(raw_id)
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        payload, error = self.read_json_body()
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        fields, error = self.validated_task_fields(payload, creating=False)
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        task = update_task(task_id, fields)
+        if task is None:
+            self.send_error_json(HTTPStatus.NOT_FOUND, "task not found")
+            return
+        self.send_json(task)
+
+    def handle_delete_task(self, raw_id: str) -> None:
+        task_id, error = parse_resource_id(raw_id)
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        if not delete_task(task_id):
+            self.send_error_json(HTTPStatus.NOT_FOUND, "task not found")
+            return
+        self.send_json({"ok": True, "deleted": True})
+
+    def handle_clear_done_tasks(self) -> None:
+        deleted = clear_done_tasks()
+        self.send_json({"ok": True, "deleted": deleted})
 
     def handle_create_goal(self) -> None:
         payload, error = self.read_json_body()

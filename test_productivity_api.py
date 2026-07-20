@@ -54,6 +54,20 @@ class ProductivityApiTests(unittest.TestCase):
         self.assertEqual(status, 201)
         return payload
 
+    def create_task(self, title="Publish task system smoke test", **overrides):
+        payload = {
+            "title": title,
+            "category": "Work",
+            "priority": "Normal",
+            "status": "todo",
+            "due_date": "2026-07-25",
+            "notes": "Created by the API test suite.",
+        }
+        payload.update(overrides)
+        status, task = self.request("POST", "/api/tasks", payload)
+        self.assertEqual(status, 201)
+        return task
+
     def test_fetching_seeded_notes(self):
         status, payload = self.request("GET", "/api/notes")
         self.assertEqual(status, 200)
@@ -64,6 +78,78 @@ class ProductivityApiTests(unittest.TestCase):
         status, payload = self.request("GET", "/api/notes")
         self.assertEqual(status, 200)
         self.assertEqual(len(payload), 4)
+
+    def test_fetching_seeded_tasks_and_filtering_by_category(self):
+        status, payload = self.request("GET", "/api/tasks")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload), 8)
+        counts = {}
+        for task in payload:
+            counts[task["status"]] = counts.get(task["status"], 0) + 1
+        self.assertEqual(counts, {"todo": 3, "in_progress": 3, "done": 2})
+
+        status, payload = self.request("GET", "/api/tasks?category=Development")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload)
+        self.assertTrue(all(task["category"] == "Development" for task in payload))
+
+    def test_creating_a_task(self):
+        task = self.create_task(category="Marketing", priority="Urgent", notes="Needs a crisp CTA.")
+        self.assertEqual(task["title"], "Publish task system smoke test")
+        self.assertEqual(task["category"], "Marketing")
+        self.assertEqual(task["priority"], "Urgent")
+        self.assertEqual(task["status"], "todo")
+        self.assertFalse(task["completed"])
+        self.assertEqual(task["notes"], "Needs a crisp CTA.")
+
+    def test_moving_task_to_done_sets_completed_automatically(self):
+        task = self.create_task()
+        status, updated = self.request("PATCH", f"/api/tasks/{task['id']}", {"status": "done"})
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["status"], "done")
+        self.assertTrue(updated["completed"])
+
+    def test_moving_done_task_away_clears_completed_automatically(self):
+        task = self.create_task(status="done")
+        self.assertTrue(task["completed"])
+        status, updated = self.request("PATCH", f"/api/tasks/{task['id']}", {"status": "in_progress"})
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["status"], "in_progress")
+        self.assertFalse(updated["completed"])
+
+    def test_updating_task_fields_and_deleting_task(self):
+        task = self.create_task()
+        status, updated = self.request(
+            "PATCH",
+            f"/api/tasks/{task['id']}",
+            {"title": "Updated task title", "priority": "Someday", "due_date": None, "notes": "Updated notes"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["title"], "Updated task title")
+        self.assertEqual(updated["priority"], "Someday")
+        self.assertIsNone(updated["due_date"])
+
+        status, payload = self.request("DELETE", f"/api/tasks/{task['id']}")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["deleted"])
+
+    def test_clearing_done_tasks(self):
+        self.create_task(status="done")
+        status, payload = self.request("DELETE", "/api/tasks/done")
+        self.assertEqual(status, 200)
+        self.assertGreaterEqual(payload["deleted"], 3)
+        status, tasks = self.request("GET", "/api/tasks")
+        self.assertEqual(status, 200)
+        self.assertTrue(all(task["status"] != "done" and not task["completed"] for task in tasks))
+
+    def test_rejecting_invalid_task_fields(self):
+        status, payload = self.request("POST", "/api/tasks", {"title": "Bad", "category": "Chores"})
+        self.assertEqual(status, 400)
+        self.assertIn("category", payload["error"]["message"])
+
+        status, payload = self.request("PATCH", "/api/tasks/1", {"status": "blocked"})
+        self.assertEqual(status, 400)
+        self.assertIn("status", payload["error"]["message"])
 
     def test_creating_a_valid_note(self):
         note = self.create_note()
