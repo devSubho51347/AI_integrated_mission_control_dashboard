@@ -1145,6 +1145,7 @@ def ensure_orchestration_request(con: sqlite3.Connection, task: dict) -> dict | 
 
 
 def list_tasks(category: str | None = None) -> list[dict]:
+    backfill_in_progress_orchestration_requests()
     sync_orchestrated_tasks()
     where = ""
     values: tuple[str, ...] = ()
@@ -1495,6 +1496,20 @@ def sync_orchestrated_tasks() -> None:
                     """,
                     (timestamp, request["id"]),
                 )
+
+
+def backfill_in_progress_orchestration_requests() -> None:
+    with closing(connect()) as con, con:
+        rows = con.execute(
+            f"""
+            {task_select_sql()}
+            WHERE t.status = 'in_progress'
+              AND (req.id IS NULL OR req.status NOT IN ('queued', 'watching'))
+            ORDER BY t.updated_at ASC
+            """
+        ).fetchall()
+        for row in rows:
+            ensure_orchestration_request(con, row_to_task(row))
 
 
 def get_task_report(report_id: int) -> dict | None:

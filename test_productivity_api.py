@@ -177,6 +177,26 @@ class ProductivityApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(updated_again["orchestration"]["id"], updated["orchestration"]["id"])
 
+    def test_listing_tasks_backfills_in_progress_task_without_orchestration_request(self):
+        task = self.create_task("Recover stale in-progress task")
+        con = sqlite3.connect(server.DB_PATH)
+        try:
+            con.execute(
+                "UPDATE tasks SET status = 'in_progress', completed = 0, updated_at = ? WHERE id = ?",
+                (server.now_iso(), task["id"]),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+        status, tasks = self.request("GET", "/api/tasks")
+        self.assertEqual(status, 200)
+        recovered = next(item for item in tasks if item["id"] == task["id"])
+        self.assertEqual(recovered["status"], "in_progress")
+        self.assertIn("orchestration", recovered)
+        self.assertEqual(recovered["orchestration"]["status"], "queued")
+        self.assertTrue(Path(recovered["orchestration"]["queue_path"]).exists())
+
     def test_completed_agent_log_moves_orchestrated_task_to_done_and_creates_report(self):
         task = self.create_task("Publish launch analysis")
         status, updated = self.request("PATCH", f"/api/tasks/{task['id']}", {"status": "in_progress"})
