@@ -1099,6 +1099,28 @@ def write_orchestration_request_file(request_id: int, task: dict, created_at: st
     return path
 
 
+def mark_orchestration_request_file_completed(request: dict, timestamp: str) -> None:
+    queue_path = request.get("queue_path")
+    if not queue_path:
+        return
+    path = Path(queue_path)
+    try:
+        if not path.resolve().is_relative_to(orchestration_request_dir().resolve()):
+            return
+    except OSError:
+        return
+    if not path.exists() or not path.is_file():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    payload["status"] = "completed"
+    payload["completed_at"] = timestamp
+    payload["updated_at"] = timestamp
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
 def ensure_orchestration_request(con: sqlite3.Connection, task: dict) -> dict | None:
     if task["status"] != "in_progress":
         return None
@@ -1471,6 +1493,7 @@ def sync_orchestrated_tasks() -> None:
             timestamp = now_iso()
             if completed_events:
                 create_task_report(con, task, request, related_events or completed_events)
+                mark_orchestration_request_file_completed(request, timestamp)
                 con.execute(
                     """
                     UPDATE tasks
@@ -1904,7 +1927,7 @@ def get_payload(key: str) -> dict:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "AgentDashboard/0.2.6"
+    server_version = "AgentDashboard/0.2.7"
 
     def log_message(self, fmt: str, *args: object) -> None:
         message = "%s - %s\n" % (self.log_date_time_string(), fmt % args)

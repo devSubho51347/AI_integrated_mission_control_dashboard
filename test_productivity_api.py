@@ -236,6 +236,10 @@ class ProductivityApiTests(unittest.TestCase):
         self.assertEqual(completed["orchestration"]["status"], "completed")
         self.assertIn("report", completed)
         self.assertIn("Orchestrator", completed["report"]["summary"])
+        queue_path = Path(completed["orchestration"]["queue_path"])
+        queue_payload = json.loads(queue_path.read_text(encoding="utf-8"))
+        self.assertEqual(queue_payload["status"], "completed")
+        self.assertEqual(queue_payload["completed_at"], completed["orchestration"]["completed_at"])
 
         report_path = server.DOCS_DIR / "orchestrator" / completed["report"]["document_filename"]
         self.assertTrue(report_path.exists())
