@@ -234,6 +234,34 @@
       font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
       white-space: nowrap;
     }
+    .model-select {
+      min-width: 190px;
+      max-width: min(310px, 46vw);
+      height: 34px;
+      padding: 0 34px 0 10px;
+      border: 1px solid #33333b;
+      border-radius: 7px;
+      background: #101014;
+      color: #f0f0f4;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .model-select:disabled { opacity: .6; cursor: wait; }
+    .model-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 8px;
+    }
+    .model-save-state {
+      min-width: 44px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 900;
+      text-align: right;
+    }
 
     .chart-card { min-height: 230px; }
     svg { width: 100%; display: block; }
@@ -513,7 +541,7 @@
         <button class="icon-btn" title="Messages">[]</button>
         <button class="icon-btn" title="Refresh">R</button>
         <button class="icon-btn" title="Alerts">!</button>
-        <span class="pill">v0.2.4</span>
+        <span class="pill">v0.2.5</span>
         <span class="dot"></span>
         <span>System Online</span>
       </div>
@@ -552,13 +580,19 @@
         ["Uptime", "7d 0h", "since boot", "purple"]
       ],
       agents: [
-        { name: "dsa-agent", role: "Configured OpenClaw agent", icon: "DA", color: "var(--blue)", tasks: 0, success: 0, model: "openai/gpt-5.5", active: "No logs yet", status: "NO LOGS" },
-        { name: "Orchestrator", role: "Verify local logging system auto model", icon: "Or", color: "var(--purple)", tasks: 1, success: 100, model: "openai/gpt-5.4", active: "4 days ago", status: "COMPLETED" },
-        { name: "blog-swarm", role: "Configured OpenClaw agent", icon: "BS", color: "var(--pink)", tasks: 0, success: 0, model: "openai/gpt-5.4", active: "No logs yet", status: "NO LOGS" },
-        { name: "Scout", role: "deep research specialist", icon: "Sc", color: "var(--yellow)", tasks: 0, success: 0, model: "openai/gpt-5.4", active: "No logs yet", status: "NO LOGS" },
-        { name: "Scribe", role: "professional content writer", icon: "Sc", color: "var(--green)", tasks: 0, success: 0, model: "openai/gpt-5.4", active: "No logs yet", status: "NO LOGS" },
-        { name: "Reach", role: "digital marketing strategist", icon: "Re", color: "var(--red)", tasks: 0, success: 0, model: "openai/gpt-5.4", active: "No logs yet", status: "NO LOGS" },
-        { name: "Dev", role: "Verify local logging system explicit model", icon: "De", color: "var(--cyan)", tasks: 1, success: 100, model: "test-model", active: "4 days ago", status: "COMPLETED" }
+        { id: "dsa-agent", name: "dsa-agent", role: "Configured OpenClaw agent", icon: "DA", color: "var(--blue)", tasks: 0, success: 0, model: "openai/gpt-5.5", active: "No logs yet", status: "NO LOGS" },
+        { id: "orchestrator", name: "Orchestrator", role: "Verify local logging system auto model", icon: "Or", color: "var(--purple)", tasks: 1, success: 100, model: "openai/gpt-5.4", active: "4 days ago", status: "COMPLETED" },
+        { id: "blog-swarm", name: "blog-swarm", role: "Configured OpenClaw agent", icon: "BS", color: "var(--pink)", tasks: 0, success: 0, model: "openai/gpt-5.4", active: "No logs yet", status: "NO LOGS" },
+        { id: "scout", name: "Scout", role: "deep research specialist", icon: "Sc", color: "var(--yellow)", tasks: 0, success: 0, model: "openai/gpt-5.4", active: "No logs yet", status: "NO LOGS" },
+        { id: "scribe", name: "Scribe", role: "professional content writer", icon: "Sc", color: "var(--green)", tasks: 0, success: 0, model: "openai/gpt-5.4", active: "No logs yet", status: "NO LOGS" },
+        { id: "reach", name: "Reach", role: "digital marketing strategist", icon: "Re", color: "var(--red)", tasks: 0, success: 0, model: "openai/gpt-5.4", active: "No logs yet", status: "NO LOGS" },
+        { id: "dev", name: "Dev", role: "Verify local logging system explicit model", icon: "De", color: "var(--cyan)", tasks: 1, success: 100, model: "test-model", active: "4 days ago", status: "COMPLETED" }
+      ],
+      modelOptions: [
+        { id: "openai/gpt-5.4", alias: "GPT" },
+        { id: "openai/gpt-5.4-mini", alias: "GPT Mini" },
+        { id: "openai/gpt-5.4-nano", alias: "GPT Nano" },
+        { id: "openai/gpt-5.5", alias: "GPT" }
       ],
       agentStats: {
         today: 0,
@@ -742,8 +776,31 @@
       return section("R", "Recent Activity", "Live feed from all agents") + `<div class="grid cols-2"><div class="card">${events.length ? events.map(e => `<p><strong>${e[0]}</strong> ${e[1]} <span class="live">${e[2]}</span> <span style="float:right;color:#777">${e[3]}</span></p><hr style="border-color:#202026">`).join("") : `<p>No recent log activity</p>`}</div><div class="card">${models.map(m => `<div class="model-row"><div><strong>${m.model}</strong><p>${m.tasks} logged task${m.tasks === 1 ? "" : "s"}</p></div><strong>${m.share}% usage</strong></div>`).join("")}</div></div>`;
     }
 
+    function modelOptionsFor(agent) {
+      const options = (MOCK_DATA.modelOptions || []).map(option => typeof option === "string" ? { id: option, alias: "" } : option);
+      const current = agent.configuredModel || agent.model;
+      if (current && !options.some(option => option.id === current)) options.push({ id: current, alias: "Current" });
+      return options;
+    }
+
+    function modelSelect(agent) {
+      const current = agent.configuredModel || agent.model;
+      const options = modelOptionsFor(agent);
+      if (!agent.id || !options.length) return `<span class="model-chip">${escapeHtml(current || "Not logged")}</span>`;
+      return `<select class="model-select" data-agent-model="${escapeHtml(agent.id)}" aria-label="Model for ${escapeHtml(agent.name)}">
+        ${options.map(option => {
+          const label = option.alias ? `${option.id} (${option.alias})` : option.id;
+          return `<option value="${escapeHtml(option.id)}" ${option.id === current ? "selected" : ""}>${escapeHtml(label)}</option>`;
+        }).join("")}
+      </select>`;
+    }
+
     function agentModelUsage() {
-      return section("M", "Model Usage", "Per-agent latest model from the log database or configured fallback") + `<div class="card">${MOCK_DATA.agents.map(a => `<div class="model-row"><strong>${a.icon} ${a.name}</strong><span><span class="model-chip">${a.model}</span> <span class="model-chip">${a.tasks} log${a.tasks === 1 ? "" : "s"}</span></span></div>`).join("")}</div>`;
+      return section("M", "Model Usage", "Per-agent configured model assignment") + `<div class="card">${MOCK_DATA.agents.map(a => {
+        const configured = a.configuredModel || a.model;
+        const latest = a.latestModel && a.latestModel !== configured ? `<span class="model-chip">latest ${escapeHtml(a.latestModel)}</span>` : "";
+        return `<div class="model-row"><strong>${escapeHtml(a.icon)} ${escapeHtml(a.name)}</strong><span class="model-actions">${modelSelect(a)}${latest}<span class="model-chip">${a.tasks} log${a.tasks === 1 ? "" : "s"}</span><span class="model-save-state" data-model-status="${escapeHtml(a.id || a.name)}"></span></span></div>`;
+      }).join("")}</div>`;
     }
 
     function agentsOverview() {
@@ -769,11 +826,54 @@
     function agents() {
       document.getElementById("agents").innerHTML = title("Z", "Agents", "Live agent operations, task metrics, and real-time activity across your autonomous fleet.", `<span>Updated 27s ago</span><button class="ghost-btn">Refresh</button>`) +
         `<div class="tabs"><button class="active" data-agent-view="overview">Overview</button><button data-agent-view="office">The Office</button></div><div id="agent-view">` + agentsOverview() + `</div>`;
+      bindAgentModelEvents();
       document.querySelectorAll("[data-agent-view]").forEach(button => button.addEventListener("click", () => {
         document.querySelectorAll("[data-agent-view]").forEach(b => b.classList.toggle("active", b === button));
         OFFICE_RUNTIME.activeView = button.dataset.agentView === "office";
         document.getElementById("agent-view").innerHTML = OFFICE_RUNTIME.activeView ? officeView() : agentsOverview();
         if (OFFICE_RUNTIME.activeView) startOfficePolling();
+        if (!OFFICE_RUNTIME.activeView) bindAgentModelEvents();
+      }));
+    }
+
+    async function updateAgentModel(agentId, model) {
+      const response = await fetch(`/api/agents/${encodeURIComponent(agentId)}/model`, {
+        method: "PATCH",
+        cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model })
+      });
+      if (!response.ok) throw new Error((await response.json()).error?.message || "Model update failed");
+      return response.json();
+    }
+
+    function bindAgentModelEvents() {
+      document.querySelectorAll("[data-agent-model]").forEach(select => select.addEventListener("change", async event => {
+        if (location.protocol === "file:") return;
+        const target = event.currentTarget;
+        const agentId = target.dataset.agentModel;
+        const agent = MOCK_DATA.agents.find(item => item.id === agentId);
+        const previous = agent?.configuredModel || target.defaultValue;
+        const status = document.querySelector(`[data-model-status="${CSS.escape(agentId)}"]`);
+        target.disabled = true;
+        if (status) status.textContent = "Saving";
+        try {
+          const updated = await updateAgentModel(agentId, target.value);
+          if (agent) {
+            agent.model = updated.model;
+            agent.configuredModel = updated.model;
+          }
+          if (updated.modelOptions) MOCK_DATA.modelOptions = updated.modelOptions;
+          target.defaultValue = updated.model;
+          if (status) status.textContent = "Saved";
+          setTimeout(() => { if (status) status.textContent = ""; }, 1600);
+        } catch (error) {
+          target.value = previous;
+          if (status) status.textContent = "Failed";
+          console.warn("Model update failed", error);
+        } finally {
+          target.disabled = false;
+        }
       }));
     }
 

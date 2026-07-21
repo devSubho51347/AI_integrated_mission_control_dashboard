@@ -10,6 +10,7 @@ import json
 import mimetypes
 import os
 import sqlite3
+import tempfile
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
@@ -442,6 +443,83 @@ def read_openclaw_config() -> dict:
     return {}
 
 
+def write_openclaw_config(config: dict) -> None:
+    OPENCLAW_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    handle = tempfile.NamedTemporaryFile(
+        "w",
+        delete=False,
+        dir=OPENCLAW_CONFIG_PATH.parent,
+        encoding="utf-8",
+        newline="\n",
+    )
+    try:
+        with handle:
+            json.dump(config, handle, indent=4, ensure_ascii=False)
+            handle.write("\n")
+        os.replace(handle.name, OPENCLAW_CONFIG_PATH)
+    except Exception:
+        try:
+            Path(handle.name).unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def available_model_options(config: dict | None = None) -> list[dict]:
+    if config is None:
+        config = read_openclaw_config()
+    agents_config = config.get("agents", {})
+    defaults = agents_config.get("defaults", {})
+    model_ids: list[str] = []
+    metadata = defaults.get("models", {})
+    if isinstance(metadata, dict):
+        model_ids.extend(str(model_id) for model_id in metadata if model_id)
+    primary = defaults.get("model", {}).get("primary")
+    if primary:
+        model_ids.append(str(primary))
+    for agent in agents_config.get("list", []):
+        model = agent.get("model")
+        if model:
+            model_ids.append(str(model))
+    options = []
+    seen = set()
+    for model_id in model_ids:
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+        model_meta = metadata.get(model_id, {}) if isinstance(metadata, dict) else {}
+        options.append({"id": model_id, "alias": model_meta.get("alias") or ""})
+    return options
+
+
+def update_agent_model(agent_id: str, model: str) -> dict | None:
+    config = read_openclaw_config()
+    allowed_models = {option["id"] for option in available_model_options(config)}
+    if model not in allowed_models:
+        raise ValueError("model must be one of the available models")
+    existing_dirs = {
+        item.name
+        for item in (OPENCLAW_DIR / "agents").iterdir()
+        if item.is_dir() and not item.name.startswith("_")
+    } if (OPENCLAW_DIR / "agents").exists() else set()
+    for agent in config.get("agents", {}).get("list", []):
+        configured_id = agent.get("id") or agent.get("name")
+        if configured_id != agent_id:
+            continue
+        if agent_id in EXCLUDED_DASHBOARD_AGENTS or agent_id not in existing_dirs:
+            return None
+        agent["model"] = model
+        write_openclaw_config(config)
+        name = agent.get("name") or agent_id
+        return {
+            "id": agent_id,
+            "name": name,
+            "model": model,
+            "modelOptions": available_model_options(config),
+        }
+    return None
+
+
 def agent_icon(name: str) -> str:
     parts = [part for part in name.replace("-", " ").split() if part]
     if not parts:
@@ -670,15 +748,19 @@ def with_live_agents(payload: dict) -> dict:
         completed = stats["completed"] if stats else 0
         total_logs += total
         completed_logs += completed
+        latest_model = latest["model_used"] if latest and latest["model_used"] else ""
         cards.append(
             {
+                "id": agent["id"],
                 "name": agent["name"],
                 "role": latest["task_description"] if latest else agent["theme"],
                 "icon": agent_icon(agent["name"]),
                 "color": AGENT_COLORS[index % len(AGENT_COLORS)],
                 "tasks": total,
                 "success": round((completed / total) * 100) if total else 0,
-                "model": latest["model_used"] if latest and latest["model_used"] else agent["model"],
+                "model": agent["model"],
+                "configuredModel": agent["model"],
+                "latestModel": latest_model,
                 "active": human_ago(latest["created_at"] if latest else None),
                 "status": (latest["status"] if latest else "No logs").upper(),
             }
@@ -695,6 +777,7 @@ def with_live_agents(payload: dict) -> dict:
                     ]
                 )
     payload["agents"] = cards
+    payload["modelOptions"] = available_model_options()
     payload["metrics"][0][1] = str(len(cards))
     payload["metrics"][1][1] = str(total_logs)
     payload["metrics"][1][2] = "logged tasks"
@@ -1451,7 +1534,7 @@ def get_payload(key: str) -> dict:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "AgentDashboard/0.2.4"
+    server_version = "AgentDashboard/0.2.5"
 
     def log_message(self, fmt: str, *args: object) -> None:
         message = "%s - %s\n" % (self.log_date_time_string(), fmt % args)
@@ -1543,7 +1626,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
     def do_PATCH(self) -> None:
-        path_parts = [part for part in urlparse(self.path).path.split("/") if part]
+        path_parts = [unquote(part) for part in urlparse(self.path).path.split("/") if part]
+        if len(path_parts) == 4 and path_parts[:2] == ["api", "agents"] and path_parts[3] == "model":
+            self.handle_config(lambda: self.handle_update_agent_model(path_parts[2]))
+            return
         if len(path_parts) == 3 and path_parts[:2] == ["api", "notes"]:
             self.handle_database(lambda: self.handle_update_note(path_parts[2]))
             return
@@ -1768,6 +1854,29 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_error_json(HTTPStatus.NOT_FOUND, "task not found")
             return
         self.send_json(task)
+
+    def handle_update_agent_model(self, agent_id: str) -> None:
+        payload, error = self.read_json_body()
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        unsupported = set(payload) - {"model"}
+        if unsupported:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, f"unsupported field: {sorted(unsupported)[0]}")
+            return
+        model, error = validate_body(payload.get("model"), "model")
+        if error:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+            return
+        try:
+            agent = update_agent_model(agent_id, model)
+        except ValueError as exc:
+            self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
+            return
+        if agent is None:
+            self.send_error_json(HTTPStatus.NOT_FOUND, "agent not found")
+            return
+        self.send_json(agent)
 
     def handle_delete_task(self, raw_id: str) -> None:
         task_id, error = parse_resource_id(raw_id)
@@ -2005,6 +2114,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             callback()
         except (OSError, UnicodeError, ValueError):
             self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, "document operation failed")
+
+    def handle_config(self, callback) -> None:
+        try:
+            callback()
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, "configuration operation failed")
 
     def send_file(self, path: Path, content_type: str | None = None) -> None:
         if not path.exists() or not path.is_file():

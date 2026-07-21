@@ -97,7 +97,22 @@ class ProductivityApiTests(unittest.TestCase):
             (server.OPENCLAW_DIR / "agents" / agent["id"] / "agent" / "codex-home" / "sessions").mkdir(parents=True, exist_ok=True)
         server.OPENCLAW_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         server.OPENCLAW_CONFIG_PATH.write_text(
-            json.dumps({"agents": {"defaults": {"model": {"primary": "test-model"}}, "list": agents}}),
+            json.dumps(
+                {
+                    "agents": {
+                        "defaults": {
+                            "model": {"primary": "test-model"},
+                            "models": {
+                                "test-model": {"alias": "Default"},
+                                "test-scout": {"alias": "Scout"},
+                                "test-scribe": {"alias": "Scribe"},
+                                "test-upgrade": {"alias": "Upgrade"},
+                            },
+                        },
+                        "list": agents,
+                    }
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -227,6 +242,34 @@ class ProductivityApiTests(unittest.TestCase):
         self.assertEqual(payload[0]["agent"], "Scout")
         self.assertEqual(payload[0]["task_description"], "Finished signal scan")
         self.assertIn("id", payload[0])
+
+    def test_bootstrap_includes_configured_models_and_model_options(self):
+        status, payload = self.request("GET", "/api/bootstrap")
+        self.assertEqual(status, 200)
+        scout = next(agent for agent in payload["agents"] if agent["id"] == "scout")
+        self.assertEqual(scout["model"], "test-scout")
+        self.assertEqual(scout["configuredModel"], "test-scout")
+        self.assertIn({"id": "test-upgrade", "alias": "Upgrade"}, payload["modelOptions"])
+
+    def test_agent_model_can_be_changed_to_an_available_model(self):
+        status, payload = self.request("PATCH", "/api/agents/scout/model", {"model": "test-upgrade"})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["id"], "scout")
+        self.assertEqual(payload["model"], "test-upgrade")
+
+        config = json.loads(server.OPENCLAW_CONFIG_PATH.read_text(encoding="utf-8"))
+        scout = next(agent for agent in config["agents"]["list"] if agent["id"] == "scout")
+        self.assertEqual(scout["model"], "test-upgrade")
+
+        status, payload = self.request("GET", "/api/bootstrap")
+        self.assertEqual(status, 200)
+        scout = next(agent for agent in payload["agents"] if agent["id"] == "scout")
+        self.assertEqual(scout["configuredModel"], "test-upgrade")
+
+    def test_agent_model_rejects_unavailable_models(self):
+        status, payload = self.request("PATCH", "/api/agents/scout/model", {"model": "unknown-model"})
+        self.assertEqual(status, 400)
+        self.assertIn("available models", payload["error"]["message"])
 
     def test_listing_documents_uses_existing_agent_files_without_body(self):
         self.write_doc_file("scout", "market-brief.md", "# Market Brief\n\nSignals.")
