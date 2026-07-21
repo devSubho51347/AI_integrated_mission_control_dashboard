@@ -372,6 +372,16 @@
     .task strong { display: block; margin-bottom: 12px; }
     .tags { display: flex; gap: 8px; flex-wrap: wrap; }
     .tag { font-family: inherit; color: #fff; }
+    .task-report {
+      margin-top: 10px;
+      color: #c9c9d0;
+      font-size: 13px;
+    }
+    .task .ghost-btn {
+      height: 30px;
+      padding: 0 10px;
+      font-size: 12px;
+    }
 
     .content-layout { grid-template-columns: 320px 1fr; align-items: start; }
     .doc-list { height: 760px; overflow: hidden; padding: 10px; border-right: 3px solid var(--orange); }
@@ -541,7 +551,7 @@
         <button class="icon-btn" title="Messages">[]</button>
         <button class="icon-btn" title="Refresh">R</button>
         <button class="icon-btn" title="Alerts">!</button>
-        <span class="pill">v0.2.5</span>
+        <span class="pill">v0.2.6</span>
         <span class="dot"></span>
         <span>System Online</span>
       </div>
@@ -1112,10 +1122,14 @@
 
     function taskCard(task) {
       const due = task.due_date ? `<span class="tag" style="color:var(--red)">Due ${escapeHtml(task.due_date)}</span>` : "";
+      const orchestration = task.orchestration ? `<span class="tag" style="color:var(--orange)">Orchestration ${escapeHtml(task.orchestration.status)}</span>` : "";
+      const report = task.report ? `<button class="ghost-btn" data-task-report-doc="${escapeHtml(`${task.report.document_agent}/${task.report.document_filename}`)}">Open Report</button>` : "";
+      const reportSummary = task.report?.summary ? `<p class="task-report">${escapeHtml(task.report.summary)}</p>` : "";
       return `<div class="task ${task.completed ? "done" : ""} ${task.priority === "Urgent" ? "urgent" : ""}">
         <strong>${escapeHtml(task.title)}</strong>
         <p style="margin-bottom:10px">${escapeHtml(task.notes || "")}</p>
-        <div class="tags"><span class="tag">${escapeHtml(task.category)}</span><span class="tag">${escapeHtml(task.priority)}</span>${due}</div>
+        <div class="tags"><span class="tag">${escapeHtml(task.category)}</span><span class="tag">${escapeHtml(task.priority)}</span>${due}${orchestration}${report}</div>
+        ${reportSummary}
         <div class="toolbar" style="margin:12px 0 0">
           <select class="search" data-task-status="${task.id}" style="height:34px">
             <option value="todo" ${task.status === "todo" ? "selected" : ""}>To Do</option>
@@ -1181,6 +1195,13 @@
         if (location.protocol === "file:") return;
         await taskRequest(`/api/tasks/${event.target.dataset.taskDelete}`, { method: "DELETE" });
         await refreshTasks();
+      }));
+      document.querySelectorAll("[data-task-report-doc]").forEach(button => button.addEventListener("click", async event => {
+        const [agent, filename] = event.currentTarget.dataset.taskReportDoc.split("/");
+        selectedDocumentKey = `${agent}/${filename}`;
+        await refreshContent();
+        document.querySelectorAll(".nav button").forEach(button => button.classList.toggle("active", button.dataset.page === "content"));
+        document.querySelectorAll(".page").forEach(page => page.classList.toggle("active", page.id === "content"));
       }));
       document.getElementById("clear-done-tasks")?.addEventListener("click", async () => {
         if (location.protocol === "file:") return;

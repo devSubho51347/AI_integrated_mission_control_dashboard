@@ -157,6 +157,75 @@ class ProductivityApiTests(unittest.TestCase):
         self.assertEqual(updated["status"], "done")
         self.assertTrue(updated["completed"])
 
+    def test_moving_task_to_in_progress_creates_orchestration_request(self):
+        task = self.create_task("Coordinate launch assets")
+        status, updated = self.request("PATCH", f"/api/tasks/{task['id']}", {"status": "in_progress"})
+        self.assertEqual(status, 200)
+        self.assertEqual(updated["status"], "in_progress")
+        self.assertFalse(updated["completed"])
+        self.assertIn("orchestration", updated)
+        self.assertEqual(updated["orchestration"]["status"], "queued")
+        self.assertIn("dsa-agent", updated["orchestration"]["agent_pool"])
+        self.assertIn("blog-swarm", updated["orchestration"]["agent_pool"])
+        queue_path = Path(updated["orchestration"]["queue_path"])
+        self.assertTrue(queue_path.exists())
+        queued = json.loads(queue_path.read_text(encoding="utf-8"))
+        self.assertEqual(queued["task_id"], task["id"])
+        self.assertEqual(queued["marker"], f"[dashboard-task:{task['id']}]")
+
+        status, updated_again = self.request("PATCH", f"/api/tasks/{task['id']}", {"notes": "Updated notes"})
+        self.assertEqual(status, 200)
+        self.assertEqual(updated_again["orchestration"]["id"], updated["orchestration"]["id"])
+
+    def test_completed_agent_log_moves_orchestrated_task_to_done_and_creates_report(self):
+        task = self.create_task("Publish launch analysis")
+        status, updated = self.request("PATCH", f"/api/tasks/{task['id']}", {"status": "in_progress"})
+        self.assertEqual(status, 200)
+        marker = f"[dashboard-task:{task['id']}]"
+
+        server.AGENT_LOGS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(server.AGENT_LOGS_DB_PATH)
+        try:
+            con.execute(
+                """
+                CREATE TABLE agent_logs (
+                    agent_name TEXT NOT NULL,
+                    task_description TEXT NOT NULL,
+                    model_used TEXT,
+                    status TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            con.execute(
+                """
+                INSERT INTO agent_logs (agent_name, task_description, model_used, status, created_at)
+                VALUES ('Orchestrator', ?, 'test-model', 'completed', ?)
+                """,
+                (f"{marker} Completed: delegated launch analysis and reviewed final output", server.now_iso()),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+        status, tasks = self.request("GET", "/api/tasks")
+        self.assertEqual(status, 200)
+        completed = next(item for item in tasks if item["id"] == task["id"])
+        self.assertEqual(completed["status"], "done")
+        self.assertTrue(completed["completed"])
+        self.assertEqual(completed["orchestration"]["status"], "completed")
+        self.assertIn("report", completed)
+        self.assertIn("Orchestrator", completed["report"]["summary"])
+
+        report_path = server.DOCS_DIR / "orchestrator" / completed["report"]["document_filename"]
+        self.assertTrue(report_path.exists())
+        self.assertIn(marker, report_path.read_text(encoding="utf-8"))
+
+        status, report = self.request("GET", f"/api/task-reports/{completed['report']['id']}")
+        self.assertEqual(status, 200)
+        self.assertEqual(report["task_id"], task["id"])
+        self.assertIn("What Each Agent Did", report["body"])
+
     def test_moving_done_task_away_clears_completed_automatically(self):
         task = self.create_task(status="done")
         self.assertTrue(task["completed"])

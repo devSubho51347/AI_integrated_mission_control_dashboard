@@ -9,6 +9,7 @@ import copy
 import json
 import mimetypes
 import os
+import re
 import sqlite3
 import tempfile
 from contextlib import closing
@@ -30,6 +31,10 @@ OPENCLAW_DIR = Path.home() / ".openclaw"
 OPENCLAW_CONFIG_PATH = OPENCLAW_DIR / "openclaw.json"
 AGENT_LOGS_DB_PATH = OPENCLAW_DIR / "agent-logs.db"
 EXCLUDED_DASHBOARD_AGENTS = {"main", "research-agent", "linkedin_trend_scraper"}
+ORCHESTRATOR_AGENT_ID = "orchestrator"
+ORCHESTRATOR_REPORT_AGENT = "orchestrator"
+ORCHESTRATION_AGENT_POOL = ["scout", "scribe", "reach", "dev", "dsa-agent", "blog-swarm"]
+ORCHESTRATION_ACTIVE_STATUSES = {"queued", "watching"}
 AGENT_COLORS = [
     "var(--blue)",
     "var(--purple)",
@@ -315,7 +320,7 @@ def row_to_productivity_item(row: sqlite3.Row) -> dict:
 
 
 def row_to_task(row: sqlite3.Row) -> dict:
-    return {
+    payload = {
         "id": row["id"],
         "title": row["title"],
         "category": row["category"],
@@ -327,6 +332,28 @@ def row_to_task(row: sqlite3.Row) -> dict:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+    keys = set(row.keys())
+    if "orchestration_request_id" in keys and row["orchestration_request_id"] is not None:
+        payload["orchestration"] = {
+            "id": row["orchestration_request_id"],
+            "status": row["orchestration_status"],
+            "queue_path": row["orchestration_queue_path"],
+            "agent_pool": json.loads(row["orchestration_agent_pool_json"] or "[]"),
+            "created_at": row["orchestration_created_at"],
+            "updated_at": row["orchestration_updated_at"],
+            "completed_at": row["orchestration_completed_at"],
+        }
+    if "report_id" in keys and row["report_id"] is not None:
+        payload["report"] = {
+            "id": row["report_id"],
+            "title": row["report_title"],
+            "summary": row["report_summary"],
+            "document_agent": row["report_document_agent"],
+            "document_filename": row["report_document_filename"],
+            "created_at": row["report_created_at"],
+            "updated_at": row["report_updated_at"],
+        }
+    return payload
 
 
 def validate_body(value: object, field_name: str = "body") -> tuple[str | None, str | None]:
@@ -801,6 +828,7 @@ def connect() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
+    con.execute("PRAGMA foreign_keys = ON")
     return con
 
 
@@ -850,6 +878,31 @@ def init_db() -> None:
                 notes TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS task_orchestration_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('queued', 'watching', 'completed')),
+                queue_path TEXT NOT NULL DEFAULT '',
+                agent_pool_json TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS task_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id INTEGER NOT NULL UNIQUE,
+                request_id INTEGER,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                document_agent TEXT NOT NULL,
+                document_filename TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+                FOREIGN KEY (request_id) REFERENCES task_orchestration_requests(id) ON DELETE SET NULL
             );
             CREATE TABLE IF NOT EXISTS productivity_items (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -961,23 +1014,152 @@ def seed_tasks(con: sqlite3.Connection) -> None:
     )
 
 
+def task_select_sql(where: str = "") -> str:
+    return f"""
+        SELECT
+            t.id, t.title, t.category, t.priority, t.status, t.completed, t.due_date, t.notes, t.created_at, t.updated_at,
+            req.id AS orchestration_request_id,
+            req.status AS orchestration_status,
+            req.queue_path AS orchestration_queue_path,
+            req.agent_pool_json AS orchestration_agent_pool_json,
+            req.created_at AS orchestration_created_at,
+            req.updated_at AS orchestration_updated_at,
+            req.completed_at AS orchestration_completed_at,
+            report.id AS report_id,
+            report.title AS report_title,
+            report.summary AS report_summary,
+            report.document_agent AS report_document_agent,
+            report.document_filename AS report_document_filename,
+            report.created_at AS report_created_at,
+            report.updated_at AS report_updated_at
+        FROM tasks t
+        LEFT JOIN task_orchestration_requests req ON req.id = (
+            SELECT id
+            FROM task_orchestration_requests
+            WHERE task_id = t.id
+            ORDER BY id DESC
+            LIMIT 1
+        )
+        LEFT JOIN task_reports report ON report.task_id = t.id
+        {where}
+    """
+
+
+def fetch_task(con: sqlite3.Connection, task_id: int) -> dict | None:
+    row = con.execute(f"{task_select_sql('WHERE t.id = ?')}", (task_id,)).fetchone()
+    return row_to_task(row) if row else None
+
+
+def orchestrator_workspace_dir() -> Path:
+    return OPENCLAW_DIR / "workspace" / ORCHESTRATOR_AGENT_ID
+
+
+def orchestration_request_dir() -> Path:
+    return orchestrator_workspace_dir() / "dashboard-task-requests"
+
+
+def dashboard_task_marker(task_id: int) -> str:
+    return f"[dashboard-task:{task_id}]"
+
+
+def safe_slug(value: str, fallback: str = "task") -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return slug[:72].strip("-") or fallback
+
+
+def write_orchestration_request_file(request_id: int, task: dict, created_at: str) -> Path:
+    queue_dir = orchestration_request_dir()
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    path = queue_dir / f"task-{task['id']}-request-{request_id}.json"
+    marker = dashboard_task_marker(task["id"])
+    payload = {
+        "schema": "komputermechanic.dashboard_task_request.v1",
+        "request_id": request_id,
+        "task_id": task["id"],
+        "marker": marker,
+        "status": "queued",
+        "created_at": created_at,
+        "task": {
+            "title": task["title"],
+            "category": task["category"],
+            "priority": task["priority"],
+            "due_date": task.get("due_date"),
+            "notes": task.get("notes") or "",
+        },
+        "agent_pool": ORCHESTRATION_AGENT_POOL,
+        "instructions": [
+            "Pick this request up during heartbeat.",
+            "Delegate to the best available agents from agent_pool.",
+            f"Preserve the marker {marker} in delegation briefs and the final completed log.",
+            "When the work is complete, log a completed Orchestrator task containing the marker.",
+            "The dashboard will detect that completed log, move the task to Done, and generate the report.",
+        ],
+    }
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
+
+
+def ensure_orchestration_request(con: sqlite3.Connection, task: dict) -> dict | None:
+    if task["status"] != "in_progress":
+        return None
+    existing = con.execute(
+        """
+        SELECT id, status, queue_path, agent_pool_json, created_at, updated_at, completed_at
+        FROM task_orchestration_requests
+        WHERE task_id = ? AND status IN ('queued', 'watching')
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (task["id"],),
+    ).fetchone()
+    if existing:
+        return dict(existing)
+    timestamp = now_iso()
+    agent_pool_json = json.dumps(ORCHESTRATION_AGENT_POOL, separators=(",", ":"))
+    cursor = con.execute(
+        """
+        INSERT INTO task_orchestration_requests (task_id, status, queue_path, agent_pool_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (task["id"], "queued", "", agent_pool_json, timestamp, timestamp),
+    )
+    request_id = cursor.lastrowid
+    queue_path = write_orchestration_request_file(request_id, task, timestamp)
+    con.execute(
+        """
+        UPDATE task_orchestration_requests
+        SET queue_path = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (str(queue_path), now_iso(), request_id),
+    )
+    return {
+        "id": request_id,
+        "status": "queued",
+        "queue_path": str(queue_path),
+        "agent_pool_json": agent_pool_json,
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "completed_at": None,
+    }
+
+
 def list_tasks(category: str | None = None) -> list[dict]:
+    sync_orchestrated_tasks()
     where = ""
     values: tuple[str, ...] = ()
     if category:
-        where = "WHERE category = ?"
+        where = "WHERE t.category = ?"
         values = (category,)
     with closing(connect()) as con:
         rows = con.execute(
             f"""
-            SELECT id, title, category, priority, status, completed, due_date, notes, created_at, updated_at
-            FROM tasks
-            {where}
+            {task_select_sql(where)}
             ORDER BY
-                CASE status WHEN 'todo' THEN 0 WHEN 'in_progress' THEN 1 ELSE 2 END,
-                CASE priority WHEN 'Urgent' THEN 0 WHEN 'Normal' THEN 1 ELSE 2 END,
-                COALESCE(due_date, '9999-12-31') ASC,
-                id ASC
+                CASE t.status WHEN 'todo' THEN 0 WHEN 'in_progress' THEN 1 ELSE 2 END,
+                CASE t.priority WHEN 'Urgent' THEN 0 WHEN 'Normal' THEN 1 ELSE 2 END,
+                COALESCE(t.due_date, '9999-12-31') ASC,
+                t.id ASC
             """,
             values,
         ).fetchall()
@@ -1006,15 +1188,11 @@ def create_task(fields: dict) -> dict:
                 timestamp,
             ),
         )
-        row = con.execute(
-            """
-            SELECT id, title, category, priority, status, completed, due_date, notes, created_at, updated_at
-            FROM tasks
-            WHERE id = ?
-            """,
-            (cursor.lastrowid,),
-        ).fetchone()
-    return row_to_task(row)
+        task = fetch_task(con, cursor.lastrowid)
+        if task and task["status"] == "in_progress":
+            ensure_orchestration_request(con, task)
+            task = fetch_task(con, cursor.lastrowid)
+    return task
 
 
 def update_task(task_id: int, updates: dict) -> dict | None:
@@ -1036,21 +1214,20 @@ def update_task(task_id: int, updates: dict) -> dict | None:
     values.append(timestamp)
     values.append(task_id)
     with closing(connect()) as con, con:
+        previous = fetch_task(con, task_id)
+        if previous is None:
+            return None
         cursor = con.execute(
             f"UPDATE tasks SET {', '.join(assignments)} WHERE id = ?",
             values,
         )
         if cursor.rowcount == 0:
             return None
-        row = con.execute(
-            """
-            SELECT id, title, category, priority, status, completed, due_date, notes, created_at, updated_at
-            FROM tasks
-            WHERE id = ?
-            """,
-            (task_id,),
-        ).fetchone()
-    return row_to_task(row)
+        task = fetch_task(con, task_id)
+        if task and "status" in updates and updates["status"] == "in_progress" and previous["status"] != "in_progress":
+            ensure_orchestration_request(con, task)
+            task = fetch_task(con, task_id)
+    return task
 
 
 def delete_task(task_id: int) -> bool:
@@ -1153,6 +1330,184 @@ def delete_document(agent: str, filename: str) -> bool:
         return False
     path.unlink()
     return True
+
+
+def task_report_filename(task: dict) -> str:
+    date_key = datetime.now().astimezone().strftime("%Y-%m-%d")
+    return f"{date_key}_task-{task['id']}-{safe_slug(task['title'])}-report.md"
+
+
+def event_matches_task(event: dict, task: dict, request_created_at: str | None = None) -> bool:
+    created = parse_timestamp(event.get("created_at"))
+    request_created = parse_timestamp(request_created_at)
+    if created and request_created and created < request_created:
+        return False
+    description = (event.get("task_description") or "").lower()
+    marker = dashboard_task_marker(task["id"]).lower()
+    if marker in description:
+        return True
+    title = re.sub(r"\s+", " ", task["title"].lower()).strip()
+    return len(title) >= 8 and title in description
+
+
+def build_task_report_body(task: dict, request: dict, events: list[dict]) -> tuple[str, str]:
+    marker = dashboard_task_marker(task["id"])
+    agents: dict[str, list[dict]] = {}
+    for event in events:
+        agent = (event.get("agent_name") or "Unknown agent").strip() or "Unknown agent"
+        agents.setdefault(agent, []).append(event)
+    agent_names = ", ".join(sorted(agents)) if agents else "Orchestrator"
+    summary = f"{agent_names} completed the task using {len(events)} matching log record{'s' if len(events) != 1 else ''}."
+    lines = [
+        f"# Task Report: {task['title']}",
+        "",
+        f"- Dashboard task ID: `{task['id']}`",
+        f"- Orchestration request ID: `{request['id']}`",
+        f"- Completion marker: `{marker}`",
+        f"- Category: {task['category']}",
+        f"- Priority: {task['priority']}",
+        f"- Generated: {now_iso()}",
+        "",
+        "## Summary",
+        "",
+        summary,
+        "",
+        "## What Each Agent Did",
+        "",
+    ]
+    if not agents:
+        lines.append("- Orchestrator completed the task, but no detailed matching agent logs were available.")
+    else:
+        for agent in sorted(agents):
+            lines.append(f"### {agent}")
+            lines.append("")
+            for event in agents[agent]:
+                description = (event.get("task_description") or "Recorded completion").strip()
+                status = (event.get("status") or "completed").strip()
+                created_at = event.get("created_at") or ""
+                lines.append(f"- {description} Status: {status}. Logged at `{created_at}`.")
+            lines.append("")
+    lines.extend(
+        [
+            "## Original Task Notes",
+            "",
+            task.get("notes") or "No notes were provided.",
+            "",
+        ]
+    )
+    return "\n".join(lines), summary
+
+
+def create_task_report(con: sqlite3.Connection, task: dict, request: dict, events: list[dict]) -> dict:
+    existing = con.execute(
+        """
+        SELECT id, title, summary, document_agent, document_filename, created_at, updated_at
+        FROM task_reports
+        WHERE task_id = ?
+        """,
+        (task["id"],),
+    ).fetchone()
+    if existing:
+        return dict(existing)
+    body, summary = build_task_report_body(task, request, events)
+    filename = task_report_filename(task)
+    document = write_document(ORCHESTRATOR_REPORT_AGENT, filename, body)
+    timestamp = now_iso()
+    cursor = con.execute(
+        """
+        INSERT INTO task_reports (
+            task_id, request_id, title, body, summary, document_agent, document_filename, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            task["id"],
+            request["id"],
+            document["title"],
+            body,
+            summary,
+            ORCHESTRATOR_REPORT_AGENT,
+            filename,
+            timestamp,
+            timestamp,
+        ),
+    )
+    return {
+        "id": cursor.lastrowid,
+        "title": document["title"],
+        "summary": summary,
+        "document_agent": ORCHESTRATOR_REPORT_AGENT,
+        "document_filename": filename,
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+
+
+def sync_orchestrated_tasks() -> None:
+    log_events = load_agent_logs()["events"]
+    if not log_events:
+        return
+    with closing(connect()) as con, con:
+        rows = con.execute(
+            f"""
+            {task_select_sql()}
+            WHERE t.status = 'in_progress'
+              AND req.status IN ('queued', 'watching')
+            ORDER BY req.created_at ASC
+            """
+        ).fetchall()
+        for row in rows:
+            task = row_to_task(row)
+            request = task.get("orchestration")
+            if not request:
+                continue
+            related_events = [
+                event
+                for event in log_events
+                if event_matches_task(event, task, request.get("created_at"))
+            ]
+            completed_events = [event for event in related_events if status_bucket(event.get("status")) == "completed"]
+            timestamp = now_iso()
+            if completed_events:
+                create_task_report(con, task, request, related_events or completed_events)
+                con.execute(
+                    """
+                    UPDATE tasks
+                    SET status = 'done', completed = 1, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (timestamp, task["id"]),
+                )
+                con.execute(
+                    """
+                    UPDATE task_orchestration_requests
+                    SET status = 'completed', updated_at = ?, completed_at = ?
+                    WHERE id = ?
+                    """,
+                    (timestamp, timestamp, request["id"]),
+                )
+            elif request.get("status") == "queued":
+                con.execute(
+                    """
+                    UPDATE task_orchestration_requests
+                    SET status = 'watching', updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (timestamp, request["id"]),
+                )
+
+
+def get_task_report(report_id: int) -> dict | None:
+    with closing(connect()) as con:
+        row = con.execute(
+            """
+            SELECT id, task_id, request_id, title, body, summary, document_agent, document_filename, created_at, updated_at
+            FROM task_reports
+            WHERE id = ?
+            """,
+            (report_id,),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def list_notes() -> list[dict]:
@@ -1534,7 +1889,7 @@ def get_payload(key: str) -> dict:
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
-    server_version = "AgentDashboard/0.2.5"
+    server_version = "AgentDashboard/0.2.6"
 
     def log_message(self, fmt: str, *args: object) -> None:
         message = "%s - %s\n" % (self.log_date_time_string(), fmt % args)
@@ -1576,6 +1931,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     self.send_error_json(HTTPStatus.BAD_REQUEST, error)
                     return
             self.handle_database(lambda: self.send_json(list_tasks(category)))
+            return
+        if len(path_parts := [unquote(part) for part in path.split("/") if part]) == 3 and path_parts[:2] == ["api", "task-reports"]:
+            report_id, error = parse_resource_id(path_parts[2])
+            if error:
+                self.send_error_json(HTTPStatus.BAD_REQUEST, error)
+                return
+            self.handle_database(lambda: self.handle_read_task_report(report_id))
             return
         if path == "/api/documents":
             self.handle_documents(lambda: self.send_json(list_documents()))
@@ -1877,6 +2239,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_error_json(HTTPStatus.NOT_FOUND, "agent not found")
             return
         self.send_json(agent)
+
+    def handle_read_task_report(self, report_id: int) -> None:
+        report = get_task_report(report_id)
+        if report is None:
+            self.send_error_json(HTTPStatus.NOT_FOUND, "task report not found")
+            return
+        self.send_json(report)
 
     def handle_delete_task(self, raw_id: str) -> None:
         task_id, error = parse_resource_id(raw_id)
